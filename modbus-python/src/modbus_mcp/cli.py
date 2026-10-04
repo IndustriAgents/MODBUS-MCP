@@ -26,7 +26,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.fastmcp.prompts import base
 from mcp.types import TextContent
-from pydantic import BeforeValidator, Field, ValidationError
+from pydantic import Field, ValidationError
 from pymodbus.client import AsyncModbusSerialClient, AsyncModbusTcpClient, AsyncModbusUdpClient
 from pymodbus.exceptions import ConnectionException, ModbusException
 
@@ -79,19 +79,15 @@ _EXCEPTION_NAMES = {
 # -----------------------------
 
 
-def _reject_bool(value: Any) -> Any:
-    # pydantic's lax mode turns true/false into 1/0 for an int; for a register
-    # address or value that would quietly read or write the wrong thing.
-    if isinstance(value, bool):
-        raise ValueError("expected an integer, not a boolean")
-    return value
-
-
+# Integers and booleans are strict: pydantic's lax mode would turn true into 1,
+# "5" into 5 and 5.0 into 5, and 1 or "on" into true. For an address, a register
+# value or a coil state that would quietly read or write something nobody asked
+# for, so only a JSON integer (or true/false) of the right type is accepted.
 def _int(lo: int, hi: int, description: str) -> Any:
-    # Field before the validator, so the bounds stay standard JSON Schema (minimum/maximum).
-    return Annotated[
-        int, Field(ge=lo, le=hi, description=description), BeforeValidator(_reject_bool)
-    ]
+    return Annotated[int, Field(ge=lo, le=hi, strict=True, description=description)]
+
+
+StrictBool = Annotated[bool, Field(strict=True)]
 
 
 Address = _int(0, 65535, "Zero-based Modbus address (0-65535).")
@@ -101,7 +97,7 @@ RegisterCount = _int(1, ADDRESS_SPACE, "Number of registers to read (at least 1)
 BitCount = _int(1, ADDRESS_SPACE, "Number of bits to read (at least 1).")
 TypedCount = _int(1, ADDRESS_SPACE, "Number of typed values to decode (at least 1).")
 SlaveId = Annotated[
-    Annotated[int, Field(ge=0, le=255), BeforeValidator(_reject_bool)] | None,
+    Annotated[int, Field(ge=0, le=255, strict=True)] | None,
     Field(description="Modbus unit/slave ID (0-255); omit to use MODBUS_DEFAULT_SLAVE_ID."),
 ]
 DType = Annotated[
@@ -676,7 +672,7 @@ async def read_coils(
 @mcp.tool()
 async def write_coil(
     address: Address,
-    value: Annotated[bool, Field(description="true = ON, false = OFF.")],
+    value: Annotated[bool, Field(strict=True, description="true = ON, false = OFF.")],
     ctx: Context,
     slave_id: SlaveId = None,
 ) -> dict[str, Any]:
@@ -895,7 +891,7 @@ async def write_registers(
 async def write_coils_bulk(
     address: Address,
     values: Annotated[
-        list[bool],
+        list[StrictBool],
         Field(
             min_length=1,
             max_length=MAX_WRITE_COILS,
@@ -986,13 +982,16 @@ async def read_device_information(
     slave_id: SlaveId = None,
     read_code: Annotated[
         int,
-        Field(ge=1, le=4, description="1 = basic, 2 = regular, 3 = extended, 4 = one object."),
-        BeforeValidator(_reject_bool),
+        Field(
+            ge=1,
+            le=4,
+            strict=True,
+            description="1 = basic, 2 = regular, 3 = extended, 4 = one object.",
+        ),
     ] = 0x03,
     object_id: Annotated[
         int,
-        Field(ge=0, le=255, description="First object to read (0 = VendorName)."),
-        BeforeValidator(_reject_bool),
+        Field(ge=0, le=255, strict=True, description="First object to read (0 = VendorName)."),
     ] = 0x00,
 ) -> dict[str, Any]:
     """Read the device identification objects (function 43 / MEI type 14).
@@ -1222,7 +1221,7 @@ async def write_tag(
         if tag.count != 1:
             error = f"Tag {name!r} covers {tag.count} coils; write them with write_coils_bulk"
             return _not_sent(error, meta=meta)
-        if not (isinstance(value, bool) or (isinstance(value, int) and value in (0, 1))):
+        if not isinstance(value, bool):
             return _not_sent(f"Coil tag {name!r} takes true or false, got {value!r}", meta=meta)
         result = await write_coil(tag.address, bool(value), ctx, tag.slave_id)
         result["meta"]["tag"] = name
@@ -1279,8 +1278,7 @@ async def ping(
     slave_id: SlaveId = None,
     address: Annotated[
         int,
-        Field(ge=0, le=65535, description="Holding register to probe (default 0)."),
-        BeforeValidator(_reject_bool),
+        Field(ge=0, le=65535, strict=True, description="Holding register to probe (default 0)."),
     ] = 0,
 ) -> dict[str, Any]:
     """Check that the device answers, and report the server's configuration.
