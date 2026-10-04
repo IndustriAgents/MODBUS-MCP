@@ -28,7 +28,7 @@ from dotenv import dotenv_values
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.fastmcp.prompts import base
-from mcp.types import TextContent
+from mcp.types import TextContent, ToolAnnotations
 from pydantic import Field, ValidationError
 from pymodbus.client import AsyncModbusSerialClient, AsyncModbusTcpClient, AsyncModbusUdpClient
 from pymodbus.exceptions import ConnectionException, ModbusException
@@ -53,6 +53,11 @@ WRITE_TOOLS = frozenset(
         "write_tag",
     }
 )
+# MCP tool annotations. A write changes the device and must never be advertised
+# as idempotent (a client could retry it); reads only read.
+READ_ONLY = ToolAnnotations(readOnlyHint=True)
+DEVICE_WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False)
+
 # meta.outcome of a write: "written" (the device acknowledged it with a reply
 # that echoes the request), "rejected" (the device refused it with an exception
 # that means nothing was done, see REFUSED), "not_sent" (refused before anything
@@ -821,7 +826,7 @@ mcp._mcp_server.version = __version__
 # -----------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def read_register(address: Address, ctx: Context, slave_id: SlaveId = None) -> dict[str, Any]:
     """Read one holding register (function 3); data.value is its raw 16-bit value."""
     app = _app(ctx)
@@ -846,7 +851,7 @@ async def read_register(address: Address, ctx: Context, slave_id: SlaveId = None
     return _make_result(True, data={"value": value}, meta=meta)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DEVICE_WRITE)
 async def write_register(
     address: Address, value: RegisterValue, ctx: Context, slave_id: SlaveId = None
 ) -> dict[str, Any]:
@@ -881,7 +886,7 @@ async def write_register(
     return _make_result(True, data={"written": value}, meta=meta)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def read_coils(
     address: Address, count: BitCount, ctx: Context, slave_id: SlaveId = None
 ) -> dict[str, Any]:
@@ -909,7 +914,7 @@ async def read_coils(
     return _make_result(True, data={"values": values}, meta=meta)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DEVICE_WRITE)
 async def write_coil(
     address: Address,
     value: Annotated[bool, Field(strict=True, description="true = ON, false = OFF.")],
@@ -945,7 +950,7 @@ async def write_coil(
     return _make_result(True, data={"written": value}, meta=meta)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def read_input_registers(
     address: Address, count: RegisterCount, ctx: Context, slave_id: SlaveId = None
 ) -> dict[str, Any]:
@@ -975,7 +980,7 @@ async def read_input_registers(
     return _make_result(True, data={"registers": values}, meta=meta)
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def read_multiple_holding_registers(
     address: Address, count: RegisterCount, ctx: Context, slave_id: SlaveId = None
 ) -> dict[str, Any]:
@@ -1047,7 +1052,7 @@ def main(argv: list[str] | None = None) -> None:
 # -----------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def read_discrete_inputs(
     address: Address, count: BitCount, ctx: Context, slave_id: SlaveId = None
 ) -> dict[str, Any]:
@@ -1077,7 +1082,7 @@ async def read_discrete_inputs(
     return _make_result(True, data={"values": values}, meta=meta)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DEVICE_WRITE)
 async def write_registers(
     address: Address,
     values: Annotated[
@@ -1133,7 +1138,7 @@ async def write_registers(
     return _make_result(True, data={"written": len(values)}, meta=meta)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DEVICE_WRITE)
 async def write_coils_bulk(
     address: Address,
     values: Annotated[
@@ -1181,7 +1186,7 @@ async def write_coils_bulk(
     return _make_result(True, data={"written": len(values)}, meta=meta)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DEVICE_WRITE)
 async def mask_write_register(
     address: Address,
     and_mask: Mask,
@@ -1233,7 +1238,7 @@ async def mask_write_register(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def read_device_information(
     ctx: Context,
     slave_id: SlaveId = None,
@@ -1343,7 +1348,7 @@ async def _read_typed(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def read_holding_typed(
     address: Address,
     dtype: DType,
@@ -1366,7 +1371,7 @@ async def read_holding_typed(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def read_input_typed(
     address: Address,
     dtype: DType,
@@ -1394,7 +1399,7 @@ async def read_input_typed(
 # -----------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def list_tags(ctx: Context) -> dict[str, Any]:
     """List the named tags defined in the tag map (REGISTER_MAP_FILE), with their definitions."""
     app = _app(ctx)
@@ -1408,7 +1413,7 @@ def _unknown_tag(name: str) -> dict[str, Any]:
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def read_tag(
     name: Annotated[str, Field(description="Tag name from list_tags.")], ctx: Context
 ) -> dict[str, Any]:
@@ -1442,7 +1447,7 @@ async def read_tag(
     return await read_discrete_inputs(tag.address, tag.count, ctx, tag.slave_id)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DEVICE_WRITE)
 async def write_tag(
     name: Annotated[str, Field(description="Tag name from list_tags.")],
     value: Annotated[
@@ -1529,7 +1534,7 @@ def _unscale(values: list[Any], tag: Tag) -> list[Any]:
 # -----------------------------
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 async def ping(
     ctx: Context,
     slave_id: SlaveId = None,

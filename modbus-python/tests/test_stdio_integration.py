@@ -17,6 +17,7 @@ import pytest
 from conftest import free_port, running_mock, stop_process
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
+from test_validation import check_annotations
 
 from modbus_mcp.cli import WRITES_DISABLED
 
@@ -89,6 +90,7 @@ async def test_initialize_reports_this_server(mock, tmp_path) -> None:
         tools = (await srv.session.list_tools()).tools
         assert len(tools) == 17
         assert all(t.description and t.description.strip() for t in tools)
+        check_annotations(tools)  # as the client receives them
         prompts = (await srv.session.list_prompts()).prompts
         assert [p.name for p in prompts] == ["analyze_register"]
 

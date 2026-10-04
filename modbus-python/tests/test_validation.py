@@ -208,3 +208,22 @@ def test_schemas_use_standard_json_schema_keywords() -> None:
 
     for tool in asyncio.run(cli.mcp.list_tools()):
         walk(tool.inputSchema)
+
+
+def check_annotations(tools) -> None:
+    """Write tools are destructive and never idempotent; every other tool is read-only."""
+    names = {tool.name for tool in tools}
+    assert cli.WRITE_TOOLS <= names
+    for tool in tools:
+        hints = tool.annotations
+        assert hints is not None, tool.name
+        if tool.name in cli.WRITE_TOOLS:
+            assert hints.readOnlyHint is False, tool.name
+            assert hints.destructiveHint is True, tool.name
+            assert hints.idempotentHint is False, tool.name
+        else:
+            assert hints.readOnlyHint is True, tool.name
+
+
+def test_tool_annotations_do_not_invite_retries() -> None:
+    check_annotations(asyncio.run(cli.mcp.list_tools()))

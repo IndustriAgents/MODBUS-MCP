@@ -5,8 +5,9 @@ description = "An MCP server that standardizes and contextualizes Modbus data, e
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    # mcp 2.x removed mcp.server.fastmcp, which this server is built on.
-    "mcp[cli]>=1.6.0,<2",
+    # mcp 2.x removed mcp.server.fastmcp, which this server is built on; 1.7.0
+    # added tool annotations (read-only / destructive hints).
+    "mcp[cli]>=1.7.0,<2",
     # Tested with every pymodbus minor release from 3.9.2 to 3.15; 3.10 renamed
     # the unit-id keyword (slave -> device_id), which cli.py handles at runtime.
     # The serial extra (pyserial) is what MODBUS_TYPE=serial needs.
