@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from conftest import run
+from conftest import make_ctx, run
 
 from modbus_mcp import cli, codec
 
@@ -47,13 +47,9 @@ def test_bad_dtype_and_order_come_back_as_envelopes(ctx) -> None:
     assert result["success"] is False and "byteorder" in result["error"]
 
 
-def test_write_tag_encodes_typed_holding_values(client, ctx, monkeypatch) -> None:
-    monkeypatch.setattr(cli, "MODBUS_WRITES_ENABLED", True)
-    monkeypatch.setattr(
-        cli,
-        "_TAG_MAP",
-        {"Speed": {"table": "holding", "address": 10, "dtype": "float32", "wordorder": "little"}},
-    )
+def test_write_tag_encodes_typed_holding_values(client) -> None:
+    tags = {"Speed": {"table": "holding", "address": 10, "dtype": "float32", "wordorder": "little"}}
+    ctx = make_ctx(client, tags, writes_enabled=True)
     result = run(cli.write_tag("Speed", 42.5, ctx))
     assert result["success"], result
     assert client.hr[10:12] == codec.encode([42.5], "float32", "big", "little")
@@ -61,9 +57,8 @@ def test_write_tag_encodes_typed_holding_values(client, ctx, monkeypatch) -> Non
     assert result["data"]["values"] == [42.5]
 
 
-def test_write_tag_rejects_out_of_range_values_before_sending(client, ctx, monkeypatch) -> None:
-    monkeypatch.setattr(cli, "MODBUS_WRITES_ENABLED", True)
-    monkeypatch.setattr(cli, "_TAG_MAP", {"Raw": {"table": "holding", "address": 3}})
+def test_write_tag_rejects_out_of_range_values_before_sending(client) -> None:
+    ctx = make_ctx(client, {"Raw": {"table": "holding", "address": 3}}, writes_enabled=True)
     result = run(cli.write_tag("Raw", 70000, ctx))
     assert result["success"] is False
     assert "out of uint16 range" in result["error"]

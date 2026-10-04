@@ -164,8 +164,26 @@ def client() -> FakeClient:
     return FakeClient()
 
 
+def make_ctx(client: FakeClient, tags: dict | None = None, **settings: Any) -> FakeContext:
+    """A context whose lifespan state holds `client`, Settings(**settings) and the tag map."""
+    from modbus_mcp import cli
+    from modbus_mcp.config import Settings, parse_tag_map
+
+    app = cli.AppContext(
+        modbus_client=client,
+        settings=Settings(retry_backoff_base=0.0, **settings),
+        tags=parse_tag_map(tags or {}),
+    )
+    return FakeContext(app)
+
+
 @pytest.fixture
 def ctx(client: FakeClient) -> FakeContext:
-    from modbus_mcp import cli
+    """Default settings."""
+    return make_ctx(client)
 
-    return FakeContext(cli.AppContext(modbus_client=client))
+
+@pytest.fixture
+def wctx(client: FakeClient) -> FakeContext:
+    """Writes enabled."""
+    return make_ctx(client, writes_enabled=True)
