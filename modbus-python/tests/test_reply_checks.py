@@ -45,6 +45,22 @@ def test_an_exception_for_another_function_does_not_make_a_write_rejected(client
     assert len(client.sent_writes) == 1
 
 
+@pytest.mark.parametrize(("count", "registers", "ok"), [(2, 2, True), (2, 1, False), (2, 3, False)])
+def test_register_counts_must_match_exactly(count, registers, ok) -> None:
+    check = cli.reply_check(3, registers=count)
+    problem = check(FakeResponse(registers=[0] * registers, function_code=3))
+    assert (problem is None) is ok, problem
+
+
+def test_a_reply_with_too_many_registers_is_not_a_read(client) -> None:
+    """Too many is as wrong as too few: the reply belongs to another request."""
+    respond_with(client, "read_holding_registers", FakeResponse(registers=[1, 2, 3]))
+    result = run(cli.read_multiple_holding_registers(0, 2, make_ctx(client, max_retries=0)))
+    assert result["success"] is False
+    assert result["error"] == "the device's reply does not match the request"
+    assert result["meta"]["reply_mismatch"]["registers"] == {"expected": 2, "got": 3}
+
+
 @pytest.mark.parametrize(
     ("count", "bits", "ok"),
     [(1, 8, True), (8, 8, True), (9, 16, True), (9, 8, False), (2, 16, False)],
