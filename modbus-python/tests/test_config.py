@@ -46,6 +46,11 @@ def test_defaults() -> None:
     assert s.register_map_file is None
 
 
+def test_writes_are_disabled_by_default() -> None:
+    assert Settings.from_env({}).writes_enabled is False
+    assert Settings().writes_enabled is False
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [("true", True), ("1", True), ("YES", True), ("on", True), ("false", False), ("0", False)],

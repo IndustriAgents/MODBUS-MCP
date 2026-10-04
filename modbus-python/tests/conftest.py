@@ -179,7 +179,7 @@ def make_ctx(client: FakeClient, tags: dict | None = None, **settings: Any) -> F
 
 @pytest.fixture
 def ctx(client: FakeClient) -> FakeContext:
-    """Default settings."""
+    """Default settings: writes disabled."""
     return make_ctx(client)
 
 

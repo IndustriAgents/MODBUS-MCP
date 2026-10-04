@@ -101,7 +101,7 @@ class Settings:
     max_retries: int = 2
     retry_backoff_base: float = 0.2
     tool_timeout: float | None = None
-    writes_enabled: bool = True
+    writes_enabled: bool = False
     register_map_file: str | None = None
 
     @classmethod
@@ -124,7 +124,7 @@ class Settings:
             retry_backoff_base=_float(env, "MODBUS_RETRY_BACKOFF_BASE", 0.2, 0.0),  # type: ignore[arg-type]
             # 0 keeps its old meaning: no per-tool timeout.
             tool_timeout=tool_timeout if tool_timeout else None,
-            writes_enabled=_bool(env, "MODBUS_WRITES_ENABLED", True),
+            writes_enabled=_bool(env, "MODBUS_WRITES_ENABLED", False),
             register_map_file=_raw(env, "REGISTER_MAP_FILE"),
         )
 
