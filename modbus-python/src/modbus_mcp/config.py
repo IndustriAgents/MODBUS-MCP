@@ -1,9 +1,10 @@
 """Server configuration, read from the environment when the server starts.
 
-Nothing here runs at import time: ``modbus_mcp.cli.main()`` loads ``.env`` first
-and then calls :meth:`Settings.from_env` and :func:`load_tag_map`, so values
-from ``.env`` are seen and a bad value stops the server at startup with a
-message, instead of surfacing later as a failed tool call.
+Nothing here runs at import time: ``modbus_mcp.cli.load_config()``, called from
+``main()``, merges the process environment, an optional ``--env-file`` and an
+automatically found ``.env`` (which may not set the write switch), then calls
+:meth:`Settings.from_env` and :func:`load_tag_map`. A bad value stops the server
+at startup with a message, instead of surfacing later as a failed tool call.
 """
 
 from __future__ import annotations

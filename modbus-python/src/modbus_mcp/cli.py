@@ -6,12 +6,14 @@ diagnostics go to stderr (logging) or to the client as MCP log messages.
 
 # No `from __future__ import annotations` here: FastMCP 1.6 finds the Context
 # parameter by comparing the annotation object itself (`is Context`).
+import argparse
 import asyncio
 import functools
 import inspect
 import json
 import logging
 import math
+import os
 import sys
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -19,7 +21,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Annotated, Any, Literal
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, find_dotenv
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.fastmcp.prompts import base
@@ -142,10 +144,43 @@ class AppContext:
 _config: tuple[Settings, dict[str, Tag]] | None = None
 
 
-def load_config() -> tuple[Settings, dict[str, Tag]]:
-    """Load `.env` (it never overrides variables already set), then read the settings."""
-    load_dotenv()
-    settings = Settings.from_env()
+# Settings that let the server change the device. They are honoured only from
+# the real process environment or a file passed explicitly with --env-file,
+# never from a .env file found automatically: when an MCP client launches the
+# server, that search can reach the client's own project, which may not be
+# trusted, and a .env there must not be able to switch writes on.
+GATE_VARIABLES = ("MODBUS_WRITES_ENABLED",)
+
+
+def load_config(env_file: str | None = None) -> tuple[Settings, dict[str, Tag]]:
+    """Read the settings and the tag map, without changing os.environ.
+
+    Sources, highest precedence first: the process environment, then `env_file`
+    (--env-file), then a `.env` found automatically by searching up from this
+    package's directory (python-dotenv's default search, as before). The
+    automatically found file may set connection settings but no GATE_VARIABLES:
+    those are ignored, with a warning on stderr naming them.
+    """
+    env = dict(os.environ)
+    if env_file is not None:
+        if not os.path.isfile(env_file):
+            raise ConfigError(f"--env-file {env_file!r} does not exist")
+        for key, value in dotenv_values(env_file).items():
+            if value is not None:
+                env.setdefault(key, value)
+    found = find_dotenv()
+    if found and not (env_file and os.path.realpath(found) == os.path.realpath(env_file)):
+        for key, value in dotenv_values(found).items():
+            if value is None:
+                continue
+            if key in GATE_VARIABLES:
+                sys.stderr.write(
+                    f"modbus-mcp: warning: ignoring {key} from {found}: it is only read from"
+                    " the process environment or a file given with --env-file\n"
+                )
+                continue
+            env.setdefault(key, value)
+    settings = Settings.from_env(env)
     return settings, load_tag_map(settings.register_map_file)
 
 
@@ -744,11 +779,24 @@ def analyze_register(value: str) -> list[base.Message]:
     ]
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     """Entry point of `modbus-mcp`: read the configuration, then serve MCP over stdio."""
+    parser = argparse.ArgumentParser(
+        prog="modbus-mcp",
+        description="MCP server for Modbus TCP/UDP/serial devices, over stdio. "
+        "Configured with MODBUS_* environment variables.",
+    )
+    parser.add_argument(
+        "--env-file",
+        metavar="PATH",
+        help="read settings from this file (after the process environment). Unlike a "
+        ".env found automatically, it may set MODBUS_WRITES_ENABLED.",
+    )
+    parser.add_argument("--version", action="version", version=f"modbus-mcp {__version__}")
+    args = parser.parse_args(argv)
     global _config
     try:
-        _config = load_config()
+        _config = load_config(args.env_file)
     except ConfigError as exc:
         sys.stderr.write(f"modbus-mcp: configuration error: {exc}\n")
         raise SystemExit(2) from None

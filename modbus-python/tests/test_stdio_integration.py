@@ -60,9 +60,11 @@ class Server:
 
 
 @contextlib.asynccontextmanager
-async def server(mock, tmp_path: Path, **env: str):
+async def server(mock, tmp_path: Path, extra_args: tuple[str, ...] = (), **env: str):
     params = StdioServerParameters(
-        command=sys.executable, args=["-m", "modbus_mcp"], env=server_env(mock, **env)
+        command=sys.executable,
+        args=["-m", "modbus_mcp", *extra_args],
+        env=server_env(mock, **env),
     )
     logs: list = []
 
@@ -136,6 +138,15 @@ async def test_writes_are_refused_by_default(mock, tmp_path) -> None:
         }
         after = await srv.call("read_register", address=20)
         assert after["data"] == before["data"]
+
+
+async def test_an_env_file_given_on_the_command_line_can_enable_writes(mock, tmp_path) -> None:
+    env_file = tmp_path / "plant.env"
+    env_file.write_text("MODBUS_WRITES_ENABLED=true\n")
+    async with server(mock, tmp_path, extra_args=("--env-file", str(env_file))) as srv:
+        assert (await srv.call("ping"))["data"]["writes_enabled"] is True
+        written = await srv.call("write_register", address=25, value=77)
+        assert written["success"] and written["meta"]["outcome"] == "written"
 
 
 async def test_bad_arguments_come_back_as_envelopes(mock, tmp_path) -> None:

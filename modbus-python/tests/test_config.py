@@ -107,28 +107,85 @@ def test_invalid_values_raise(name: str, value: str, message: str) -> None:
         Settings.from_env({name: value})
 
 
-def test_load_config_reads_settings_after_load_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.fixture
+def no_modbus_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
     for var in MODBUS_VARS:
         monkeypatch.delenv(var, raising=False)
-    calls: list[str] = []
+    return monkeypatch
 
-    def fake_load_dotenv() -> bool:
-        # What python-dotenv does with a .env file: put its values into os.environ.
-        calls.append("load_dotenv")
-        os.environ["MODBUS_PORT"] = "1502"
-        os.environ["MODBUS_WRITES_ENABLED"] = "true"
-        return True
 
-    monkeypatch.setattr(cli, "load_dotenv", fake_load_dotenv)
-    try:
-        settings, tags = cli.load_config()
-    finally:
-        os.environ.pop("MODBUS_PORT", None)
-        os.environ.pop("MODBUS_WRITES_ENABLED", None)
-    assert calls == ["load_dotenv"]
-    assert settings.port == 1502
-    assert settings.writes_enabled is True
+def found_dotenv(monkeypatch: pytest.MonkeyPatch, path) -> None:
+    """Make `path` the .env that python-dotenv's search would find automatically."""
+    monkeypatch.setattr(cli, "find_dotenv", lambda *a, **k: str(path))
+
+
+def test_an_automatically_found_env_sets_connection_settings(no_modbus_env, tmp_path) -> None:
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("MODBUS_HOST=10.0.0.5\nMODBUS_PORT=1502\n")
+    found_dotenv(no_modbus_env, dotenv)
+    settings, tags = cli.load_config()
+    assert (settings.host, settings.port) == ("10.0.0.5", 1502)
     assert tags == {}
+    assert "MODBUS_PORT" not in os.environ  # read, not exported
+
+
+def test_an_automatically_found_env_cannot_enable_writes(no_modbus_env, tmp_path, capsys) -> None:
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("MODBUS_PORT=1502\nMODBUS_WRITES_ENABLED=true\n")
+    found_dotenv(no_modbus_env, dotenv)
+    settings, _ = cli.load_config()
+    assert settings.writes_enabled is False
+    assert settings.port == 1502  # the rest of the file still applies
+    err = capsys.readouterr().err
+    assert "ignoring MODBUS_WRITES_ENABLED" in err and str(dotenv) in err
+
+
+def test_an_explicit_env_file_can_enable_writes(no_modbus_env, tmp_path, capsys) -> None:
+    no_modbus_env.setattr(cli, "find_dotenv", lambda *a, **k: "")  # no .env found
+    env_file = tmp_path / "plant.env"
+    env_file.write_text("MODBUS_WRITES_ENABLED=true\nMODBUS_PORT=1503\n")
+    settings, _ = cli.load_config(str(env_file))
+    assert settings.writes_enabled is True and settings.port == 1503
+    assert capsys.readouterr().err == ""
+
+
+def test_the_process_environment_can_enable_writes(no_modbus_env, tmp_path) -> None:
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("MODBUS_WRITES_ENABLED=false\n")
+    found_dotenv(no_modbus_env, dotenv)
+    no_modbus_env.setenv("MODBUS_WRITES_ENABLED", "true")
+    assert cli.load_config()[0].writes_enabled is True
+
+
+def test_precedence_environment_then_env_file_then_found_env(no_modbus_env, tmp_path) -> None:
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("MODBUS_HOST=found\nMODBUS_PORT=1111\nMODBUS_DEFAULT_SLAVE_ID=3\n")
+    found_dotenv(no_modbus_env, dotenv)
+    env_file = tmp_path / "explicit.env"
+    env_file.write_text("MODBUS_PORT=2222\nMODBUS_DEFAULT_SLAVE_ID=4\n")
+    no_modbus_env.setenv("MODBUS_DEFAULT_SLAVE_ID", "5")
+    settings, _ = cli.load_config(str(env_file))
+    assert (settings.host, settings.port, settings.default_slave_id) == ("found", 2222, 5)
+
+
+def test_a_missing_env_file_is_a_configuration_error(no_modbus_env, tmp_path) -> None:
+    with pytest.raises(ConfigError, match="--env-file"):
+        cli.load_config(str(tmp_path / "missing.env"))
+
+
+def test_main_reads_the_env_file_argument(tmp_path) -> None:
+    env_file = tmp_path / "bad.env"
+    env_file.write_text("MODBUS_TYPE=bogus\n")
+    proc = subprocess.run(
+        [sys.executable, "-m", "modbus_mcp", "--env-file", str(env_file)],
+        env=clean_env(),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert proc.returncode == 2
+    assert "MODBUS_TYPE must be one of" in proc.stderr and proc.stdout == ""
 
 
 def test_importing_the_server_does_not_read_the_environment() -> None:
