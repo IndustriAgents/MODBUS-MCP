@@ -76,7 +76,9 @@ def envelope_of(result) -> dict:
     return json.loads(result[0].text)
 
 
-def test_a_pending_write_is_dropped_when_the_client_disconnects(client, connected_app) -> None:
+def test_a_pending_write_is_dropped_when_the_client_disconnects(
+    client, connected_app, monkeypatch
+) -> None:
     client.connected = False
     device_up = asyncio.Event()
 
@@ -94,7 +96,10 @@ def test_a_pending_write_is_dropped_when_the_client_disconnects(client, connecte
         device_up.set()  # the device comes back after the client has gone
         result = envelope_of(await asyncio.wait_for(call, 5))
         await asyncio.sleep(0.5)
+        entered = []  # a tool body that runs looks up the server state first
+        monkeypatch.setattr(cli, "_app", lambda ctx: entered.append(1) or connected_app)
         later = envelope_of(await cli.mcp.call_tool("write_register", {"address": 2, "value": 6}))
+        assert entered == [], "a new call started after the client had gone"
         return result, later
 
     result, later = asyncio.run(scenario())
