@@ -187,9 +187,9 @@ class SendGate:
             if reason is not None:
                 raise RequestNotSent(reason)
             self.sent += 1
-            state = _CALL.get()
+            state = _CALL.get()  # the call whose task is sending this frame
             if state is not None:
-                state.sent = True
+                state.frames += 1
         return data
 
 
@@ -406,7 +406,11 @@ class _CallState:
     expires: float  # event-loop time
     seconds: float
     cancelled: bool = False  # it ended without a result: nothing of it may be sent
-    sent: bool = False  # one of its requests was handed to the transport
+    frames: int = 0  # requests of THIS call handed to the transport (counted by SendGate)
+
+    @property
+    def sent(self) -> bool:
+        return self.frames > 0
 
     @classmethod
     def start(cls, seconds: float) -> "_CallState":
@@ -480,11 +484,22 @@ async def run_with_deadline(
         _CALL.reset(token)
 
 
+def _frames_now(app: AppContext) -> int | None:
+    """Frames handed to the transport so far: by the current tool call if there is one
+    (other calls run concurrently and must not count), else by the client; None if
+    unknown."""
+    state = _CALL.get()
+    if state is not None:
+        return state.frames
+    return app.frames_sent() if app.frames_sent else None
+
+
 def _sent_since(app: AppContext, frames_before: int | None) -> bool | None:
     """Was a frame handed to the transport since `frames_before`? None if unknown."""
-    if frames_before is None or app.frames_sent is None:
+    now = _frames_now(app)
+    if frames_before is None or now is None:
         return None
-    return app.frames_sent() != frames_before
+    return now != frames_before
 
 
 async def _retry_call(
@@ -520,7 +535,7 @@ async def _retry_call(
     attempt = 0
     start = time.perf_counter()
     last_err: str | None = None
-    frames_at_start = app.frames_sent() if app.frames_sent else None
+    frames_at_start = _frames_now(app)
 
     def elapsed_ms() -> float:
         return (time.perf_counter() - start) * 1000.0
@@ -551,7 +566,7 @@ async def _retry_call(
             if not connected:
                 last_err = f"cannot reach device at {settings.target}"
                 continue
-        frames_before = app.frames_sent() if app.frames_sent else None
+        frames_before = _frames_now(app)
         try:
             result = await _with_timeout(call_factory(), _limit(settings.tool_timeout))
             return result, None, elapsed_ms(), attempt

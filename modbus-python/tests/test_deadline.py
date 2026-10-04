@@ -159,3 +159,33 @@ def test_a_write_kept_alive_past_its_deadline_is_refused_at_the_send(client) -> 
     assert result["meta"]["outcome"] == "not_sent"
     assert isinstance(done[0], cli.RequestNotSent) and "deadline" in str(done[0])
     assert client.sent == []
+
+
+def test_another_calls_frame_does_not_count_as_this_write_being_sent(client) -> None:
+    """Calls run concurrently. A read going out while a write still waits must not make
+    the write look sent: a write that never left is not_sent, not unknown."""
+
+    async def scenario():
+        queue = asyncio.Lock()
+        await queue.acquire()
+
+        async def write_register(address, value, *, device_id=1):
+            async with queue:  # waits behind the read
+                client._enter("write_register", address=address, value=value)
+                return FakeResponse(function_code=6, address=address, registers=[value])
+
+        client.write_register = write_register
+        ctx = make_ctx(client, writes_enabled=True)
+        write = asyncio.create_task(cli.run_with_deadline(0.4, cli.write_register(1, 5, ctx)))
+        await asyncio.sleep(0.1)
+        # Another call sends a frame while the write is still queued.
+        read = await cli.run_with_deadline(5, cli.read_register(0, ctx))
+        assert read["success"] and client.sent and client.sent[-1][0] == "read_holding_registers"
+        result = await write  # its deadline passes while it is still queued
+        queue.release()
+        await asyncio.sleep(0.2)
+        return result
+
+    result = asyncio.run(scenario())
+    assert result["meta"]["outcome"] == "not_sent" and result["meta"]["request_sent"] is False
+    assert [name for name, _ in client.sent] == ["read_holding_registers"]
