@@ -13,11 +13,11 @@ concurrency:
 permissions:
   contents: read
 
-# Cheap, deterministic checks only: nothing here needs a running Modbus device.
 # Both uv projects commit their uv.lock and are installed with --locked, so CI
-# fails if a lockfile drifts from its pyproject.toml. The MCP server only works
-# with the versions its lockfile pins (see CONTRIBUTING.md), so --locked is what
-# keeps CI honest about what users actually get.
+# fails if a lockfile drifts from its pyproject.toml. The server's tests include
+# integration tests that start the mock device from ../modbus-mock-server (with
+# `uv run --locked`, on a free port) and drive the real server over stdio with
+# the MCP client SDK, so no external device is needed.
 jobs:
   server:
     name: MCP server (modbus-python)
@@ -35,13 +35,15 @@ jobs:
       - name: Install dependencies from uv.lock
         run: uv sync --locked
 
+      - name: Lint (ruff check)
+        run: uv run --locked ruff check
+
+      - name: Check formatting (ruff format)
+        run: uv run --locked ruff format --check
+
       - name: Byte-compile sources
         run: uv run --locked python -m compileall -q src
 
-      # `modbus-mcp` has no --help, and it only serves a client once it has
-      # reached a device (with none, it exits when a client connects). So check
-      # what can be checked without one: the package imports, every tool
-      # registers, and the console script resolves.
       - name: Import package, list registered tools, resolve entry point
         run: |
           uv run --locked python - <<'EOF'
@@ -50,15 +52,44 @@ jobs:
 
           from modbus_mcp.cli import mcp
 
-          tools = sorted(t.name for t in asyncio.run(mcp.list_tools()))
-          print(f"{len(tools)} tools registered: {', '.join(tools)}")
-          missing = {"ping", "read_register", "read_input_registers", "read_coils"} - set(tools)
-          assert not missing, f"core tools missing: {missing}"
+          tools = asyncio.run(mcp.list_tools())
+          print(f"{len(tools)} tools registered: {', '.join(sorted(t.name for t in tools))}")
+          undocumented = [t.name for t in tools if not (t.description or "").strip()]
+          assert not undocumented, f"tools without a description: {undocumented}"
 
           (ep,) = entry_points(group="console_scripts", name="modbus-mcp")
           assert callable(ep.load()), ep
           print("console script modbus-mcp ->", ep.value)
           EOF
+
+      - name: Tests (unit, and integration against the mock device)
+        run: uv run --locked pytest -v
+
+  server-lowest:
+    # The supported ranges in pyproject.toml start at mcp 1.6.0 and pymodbus
+    # 3.9.2 (which still uses `slave=` and has pymodbus.payload, which the codec
+    # test compares against). The lockfile pins the newest releases, so check
+    # the bottom of the range here.
+    name: MCP server on the lowest supported mcp and pymodbus
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: modbus-python
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install dependencies from uv.lock
+        run: uv sync --locked
+
+      - name: Downgrade to mcp 1.6.0 and pymodbus 3.9.2
+        run: uv pip install "mcp[cli]==1.6.0" "pymodbus==3.9.2"
+
+      - name: Tests (unit, and integration against the mock device)
+        run: uv run --no-sync pytest -v
 
   mock:
     name: Mock device (modbus-mock-server)
@@ -76,20 +107,30 @@ jobs:
       - name: Install dependencies from uv.lock
         run: uv sync --locked
 
+      - name: Lint (ruff check)
+        run: uv run --locked ruff check
+
+      - name: Check formatting (ruff format)
+        run: uv run --locked ruff format --check
+
       - name: Byte-compile sources
         run: uv run --locked python -m compileall -q modbus_local_server.py
 
       # Builds the simulated datastore without binding a port, which catches a
       # pymodbus upgrade that breaks the mock before anyone tries to start it.
-      - name: Import module, build datastore, resolve entry point
+      # The server job's integration tests exercise the running mock over TCP.
+      - name: Build datastore, check initial values, resolve entry point
         run: |
           uv run --locked python - <<'EOF'
           from importlib.metadata import entry_points
 
-          import modbus_local_server
+          import modbus_local_server as m
 
-          modbus_local_server.build_context()
-          print("datastore built")
+          device = m.build_context()[0]
+          assert device.getValues(m.HOLDING_REGISTERS, 0, 10) == m.INITIAL_HOLDING
+          assert device.getValues(m.INPUT_REGISTERS, 0, 9) == m.INITIAL_INPUTS
+          assert device.getValues(m.HOLDING_REGISTERS, 0, 1) == [50]  # Valve Position
+          print("datastore built; initial values at the documented addresses")
 
           (ep,) = entry_points(group="console_scripts", name="modbus-mock-server")
           assert callable(ep.load()), ep
