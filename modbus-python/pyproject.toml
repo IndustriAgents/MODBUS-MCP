@@ -9,7 +9,8 @@ dependencies = [
     "mcp[cli]>=1.6.0,<2",
     # Tested with every pymodbus minor release from 3.9.2 to 3.15; 3.10 renamed
     # the unit-id keyword (slave -> device_id), which cli.py handles at runtime.
-    "pymodbus>=3.9.2,<3.16",
+    # The serial extra (pyserial) is what MODBUS_TYPE=serial needs.
+    "pymodbus[serial]>=3.9.2,<3.16",
     "python-dotenv>=1.1.0",
 ]
 

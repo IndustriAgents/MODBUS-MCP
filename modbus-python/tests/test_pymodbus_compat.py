@@ -43,3 +43,17 @@ def test_installed_pymodbus_accepts_the_chosen_keyword_everywhere() -> None:
         for method in CLIENT_METHODS:
             params = inspect.signature(getattr(client_type, method)).parameters
             assert keyword in params, (client_type.__name__, method, keyword)
+
+
+def test_serial_client_can_be_created() -> None:
+    """pymodbus' serial client needs pyserial (the pymodbus[serial] extra)."""
+    import asyncio
+
+    from modbus_mcp.config import Settings
+
+    async def build():
+        client = cli._make_client(Settings(modbus_type="serial", serial_port="/dev/null"))
+        client.close()
+        return type(client)
+
+    assert asyncio.run(build()) is AsyncModbusSerialClient
