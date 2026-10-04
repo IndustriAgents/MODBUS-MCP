@@ -118,15 +118,15 @@ async def _retry_call(
         except (ConnectionError, OSError) as e:
             # TCP connection dropped — attempt reconnect before retrying
             last_err = f"{type(e).__name__}: {str(e)}"
-            ctx.error(f"{op} connection error on attempt {attempt}: {last_err}")
+            await ctx.error(f"{op} connection error on attempt {attempt}: {last_err}")
             if attempt > max_retries:
                 break
             if client is not None:
                 try:
-                    ctx.info(f"{op} attempting reconnect before retry {attempt + 1}")
+                    await ctx.info(f"{op} attempting reconnect before retry {attempt + 1}")
                     await client.connect()
                 except Exception as reconnect_err:
-                    ctx.error(f"{op} reconnect failed: {reconnect_err}")
+                    await ctx.error(f"{op} reconnect failed: {reconnect_err}")
             backoff = MODBUS_RETRY_BACKOFF_BASE * (2 ** (attempt - 1))
             await asyncio.sleep(backoff)
         except Exception as e:  # unexpected
