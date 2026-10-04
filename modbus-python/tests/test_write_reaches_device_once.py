@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import struct
+import time
 from collections import Counter
 from types import SimpleNamespace
 
@@ -33,8 +34,9 @@ class DropWriteRepliesDevice:
     and counts every request frame it receives.
 
     `write_reply` says how it answers a write: "drop" (no reply, the default),
-    "echo" (a correct reply), "bad_echo" (a reply whose echoed value is wrong), or
-    a Modbus exception code (the write is then not applied).
+    "echo" (a correct reply), "bad_echo" (a reply whose echoed value is wrong), a
+    Modbus exception code (the write is then not applied), or "garbage" (every
+    request, read or write, gets bytes that never form a Modbus frame).
     """
 
     def __init__(self, write_reply: str | int = "drop") -> None:
@@ -74,6 +76,8 @@ class DropWriteRepliesDevice:
     def _handle(self, fc: int, data: bytes) -> bytes | None:
         address = struct.unpack(">H", data[:2])[0]
         self.received[(fc, address)] += 1
+        if self.write_reply == "garbage":  # answer everything with bytes that never form a frame
+            return b"garbage!" * 3
         if fc in (5, 6, 15, 16, 22) and isinstance(self.write_reply, int):
             return bytes([fc | 0x80, self.write_reply])  # refused, not applied
         if fc == 3:
@@ -209,3 +213,27 @@ async def test_reply_classification_over_the_wire(tmp_path) -> None:
                     may = "may have been applied" in (result["error"] or "")
                     assert may is (outcome == "unknown"), label
                     assert device.received[frame] == 1, label
+
+
+async def test_a_peer_that_answers_garbage_cannot_hang_a_call(tmp_path) -> None:
+    """pymodbus drops the garbled bytes and keeps waiting; the deadline (2 s, shorter
+    than pymodbus' own 3 s timeout) ends every call with an outcome."""
+    async with DropWriteRepliesDevice(write_reply="garbage") as device:
+        target = SimpleNamespace(host=device.host, port=device.port)
+        env = {"MODBUS_WRITES_ENABLED": "true", "MODBUS_CALL_TIMEOUT": "2"}
+        async with server(target, tmp_path, **env) as srv:
+            start = time.monotonic()
+            read = await srv.call("read_register", address=0)
+            assert time.monotonic() - start < 2.9  # 2 s deadline + slack
+            assert read["success"] is False
+            assert read["error"].startswith("no result within the 2 s deadline"), read
+
+            start = time.monotonic()
+            write = await srv.call("write_register", address=1, value=5)
+            assert time.monotonic() - start < 2.9  # 2 s deadline + slack
+            assert write["error"] == WRITE_NO_REPLY, write
+            assert write["meta"]["outcome"] == "unknown" and write["meta"]["request_sent"] is True
+            assert device.received[(6, 1)] == 1
+
+            ping = await srv.call("ping")
+            assert ping["success"] is False and ping["data"]["device_reachable"] is False

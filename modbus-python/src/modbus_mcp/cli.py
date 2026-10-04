@@ -8,6 +8,7 @@ diagnostics go to stderr (logging) or to the client as MCP log messages.
 # parameter by comparing the annotation object itself (`is Context`).
 import argparse
 import asyncio
+import contextvars
 import functools
 import inspect
 import json
@@ -339,9 +340,10 @@ def _span_error(address: int, span: int) -> str | None:
 
 
 async def _with_timeout(coro: Awaitable[Any], timeout: float | None) -> Any:
-    if timeout is None or timeout <= 0:
+    """Await `coro`, giving up after `timeout` seconds (None: no limit; <= 0: at once)."""
+    if timeout is None:
         return await coro
-    return await asyncio.wait_for(coro, timeout=timeout)
+    return await asyncio.wait_for(coro, timeout=max(timeout, 0.0))
 
 
 async def _reconnect(ctx: Context, app: AppContext, op: str) -> bool:
@@ -367,6 +369,52 @@ async def _reconnect(ctx: Context, app: AppContext, op: str) -> bool:
             return False
         await ctx.info(f"{op}: reconnected to {app.settings.target}")
         return True
+
+
+# The deadline of the tool call in progress: (loop time it expires, its length in s).
+# Set by run_with_deadline(); every request and retry stops when it is reached.
+_DEADLINE: contextvars.ContextVar[tuple[float, float] | None] = contextvars.ContextVar(
+    "modbus_mcp_deadline", default=None
+)
+# How long after the deadline the hard backstop in ModbusMCP.call_tool fires.
+DEADLINE_BACKSTOP = 2.0
+
+
+def _remaining() -> float | None:
+    """Seconds left before the current tool call's deadline; None without one."""
+    deadline = _DEADLINE.get()
+    if deadline is None:
+        return None
+    return deadline[0] - asyncio.get_running_loop().time()
+
+
+def _deadline_error() -> str:
+    deadline = _DEADLINE.get()
+    seconds = deadline[1] if deadline else 0
+    return f"no result within the {seconds:g} s deadline (MODBUS_CALL_TIMEOUT)"
+
+
+def _limit(timeout: float | None) -> float | None:
+    """`timeout`, shortened to what is left of the deadline."""
+    remaining = _remaining()
+    if remaining is None:
+        return timeout
+    return remaining if timeout is None else min(timeout, remaining)
+
+
+async def run_with_deadline(seconds: float, coro: Awaitable[Any]) -> Any:
+    """Run `coro` (a tool call) with an overall deadline of `seconds`.
+
+    _retry_call shortens every request, reconnect and backoff to fit, so a call
+    ends with a precise outcome when the deadline is reached. As a backstop, the
+    whole call is cancelled DEADLINE_BACKSTOP seconds later (asyncio.TimeoutError).
+    """
+    loop = asyncio.get_running_loop()
+    token = _DEADLINE.set((loop.time() + seconds, seconds))
+    try:
+        return await asyncio.wait_for(coro, seconds + DEADLINE_BACKSTOP)
+    finally:
+        _DEADLINE.reset(token)
 
 
 def _sent_since(app: AppContext, frames_before: int | None) -> bool | None:
@@ -409,6 +457,7 @@ async def _retry_call(
     attempt = 0
     start = time.perf_counter()
     last_err: str | None = None
+    frames_at_start = app.frames_sent() if app.frames_sent else None
 
     def elapsed_ms() -> float:
         return (time.perf_counter() - start) * 1000.0
@@ -416,13 +465,25 @@ async def _retry_call(
     while attempt <= max_retries:
         attempt += 1
         if attempt > 1:
-            await asyncio.sleep(settings.retry_backoff_base * (2 ** (attempt - 2)))
-        if not getattr(client, "connected", True) and not await _reconnect(ctx, app, op):
-            last_err = f"cannot reach device at {settings.target}"
-            continue
+            backoff = settings.retry_backoff_base * (2 ** (attempt - 2))
+            await asyncio.sleep(max(0.0, _limit(backoff) or 0.0))
+        remaining = _remaining()
+        if remaining is not None and remaining <= 0:  # the call's deadline has passed
+            last_err = _deadline_error() if last_err is None else f"{_deadline_error()}: {last_err}"
+            if write:  # writes are only retried while nothing has gone out
+                details["request_sent"] = _sent_since(app, frames_at_start)
+            break
+        if not getattr(client, "connected", True):
+            try:
+                connected = await _with_timeout(_reconnect(ctx, app, op), _limit(None))
+            except asyncio.TimeoutError:
+                connected = False
+            if not connected:
+                last_err = f"cannot reach device at {settings.target}"
+                continue
         frames_before = app.frames_sent() if app.frames_sent else None
         try:
-            result = await _with_timeout(call_factory(), settings.tool_timeout)
+            result = await _with_timeout(call_factory(), _limit(settings.tool_timeout))
             return result, None, elapsed_ms(), attempt
         except ConnectionException as e:
             # Raised before anything is sent, so retrying cannot repeat a write.
@@ -682,7 +743,39 @@ class ModbusMCP(FastMCP):
     them one: success=false with the reason in `error`.
     """
 
+    def _call_timeout(self) -> float:
+        """MODBUS_CALL_TIMEOUT of the running server (the default outside a session)."""
+        try:
+            return self.get_context().request_context.lifespan_context.settings.call_timeout
+        except Exception:
+            return Settings().call_timeout
+
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+        seconds = self._call_timeout()
+        try:
+            return await run_with_deadline(seconds, self._call_tool(name, arguments))
+        except asyncio.TimeoutError:
+            # The backstop: something outside _retry_call did not finish in time.
+            tool = self._tool_manager.get_tool(name)
+            if tool is None:
+                raise
+            error = f"did not finish within the {seconds:g} s deadline (MODBUS_CALL_TIMEOUT)"
+            meta: dict[str, Any] = {"tool": name}
+            if name in WRITE_TOOLS:
+                meta.update(outcome="unknown", request_sent=None)
+                error += f"; {MAY_HAVE_BEEN_APPLIED}"
+            return self._envelope(tool, _make_result(False, error=error, meta=meta))
+
+    @staticmethod
+    def _envelope(tool: Any, envelope: dict[str, Any]) -> Any:
+        # mcp >= 1.10 also returns structured content; let the tool's own
+        # converter shape the envelope exactly like a normal result.
+        convert = getattr(getattr(tool, "fn_metadata", None), "convert_result", None)
+        if convert is not None:
+            return convert(envelope)
+        return [TextContent(type="text", text=json.dumps(envelope))]
+
+    async def _call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
         try:
             return await super().call_tool(name, arguments)
         except ToolError as exc:
@@ -702,14 +795,8 @@ class ModbusMCP(FastMCP):
                     meta.update(outcome="not_sent", request_sent=False)
                 else:  # raised somewhere in the tool: whether a request went out is unknown
                     meta.update(outcome="unknown", request_sent=None)
-                    error += "; the write may have been applied; check before retrying"
-            envelope = _make_result(False, error=error, meta=meta)
-            # mcp >= 1.10 also returns structured content; let the tool's own
-            # converter shape the envelope exactly like a normal result.
-            convert = getattr(getattr(tool, "fn_metadata", None), "convert_result", None)
-            if convert is not None:
-                return convert(envelope)
-            return [TextContent(type="text", text=json.dumps(envelope))]
+                    error += f"; {MAY_HAVE_BEEN_APPLIED}"
+            return self._envelope(tool, _make_result(False, error=error, meta=meta))
 
 
 mcp = ModbusMCP(
