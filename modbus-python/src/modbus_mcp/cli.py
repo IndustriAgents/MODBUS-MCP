@@ -10,6 +10,7 @@ import argparse
 import asyncio
 import contextlib
 import contextvars
+import decimal
 import functools
 import inspect
 import json
@@ -1869,28 +1870,41 @@ async def write_tag(
     return result
 
 
+def _decimal(value: int | float) -> decimal.Decimal:
+    """The number as written: an int exactly, a float by its shortest repr (0.1 -> 0.1)."""
+    return decimal.Decimal(value) if isinstance(value, int) else decimal.Decimal(repr(value))
+
+
 def _unscale(values: list[Any], tag: Tag) -> list[Any]:
     """Turn engineering values back into raw values: (value - offset) / scale.
 
-    read_tag returns raw * scale + offset, so write_tag accepts the same units. For
-    an integer dtype the result must be a whole number; 25.35 on a tag with scale
-    0.1 is refused rather than rounded to a different value.
+    read_tag returns raw * scale + offset, so write_tag accepts the same units. The
+    arithmetic is decimal, not float: for an integer dtype the raw value must come
+    out exactly whole, so 25.35 on a tag with scale 0.1, or 1000000000 on a tag with
+    offset 0.5, is refused rather than rounded, and a 64-bit value is not squeezed
+    through a float's 53 bits.
     """
     if tag.scale == 1 and tag.offset == 0:
         return values
     raw: list[Any] = []
-    for value in values:
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise codec.CodecError(f"value must be a number, got {value!r}")
-        r = (value - tag.offset) / tag.scale
-        if tag.dtype not in ("float32", "float64"):
-            if not math.isfinite(r) or abs(r - round(r)) > 1e-9 * max(1.0, abs(r)):
+    with decimal.localcontext() as context:
+        context.prec = 120  # far beyond any 64-bit value and float repr
+        scale, offset = _decimal(tag.scale), _decimal(tag.offset)
+        for value in values:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise codec.CodecError(f"value must be a number, got {value!r}")
+            if isinstance(value, float) and not math.isfinite(value):
+                raise codec.CodecError(f"value must be finite, got {value!r}")
+            r = (_decimal(value) - offset) / scale
+            if tag.dtype in ("float32", "float64"):
+                raw.append(float(r))
+            elif r != r.to_integral_value():
                 raise codec.CodecError(
                     f"{value!r} is not a whole number of steps of scale {tag.scale}"
-                    f" (offset {tag.offset}); the raw value would be {r!r}"
+                    f" (offset {tag.offset}); the raw value would be {r.normalize()}"
                 )
-            r = round(r)
-        raw.append(r)
+            else:
+                raw.append(int(r))
     return raw
 
 

@@ -90,3 +90,35 @@ def test_write_tag_refuses_values_between_scale_steps(client) -> None:
     assert result["success"] is False
     assert "whole number of steps" in result["error"]
     assert client.calls == []
+
+
+EXACT = {
+    "Offset": {"table": "holding", "address": 40, "dtype": "int32", "offset": 0.5},
+    "Tenths": {"table": "holding", "address": 42, "dtype": "uint32", "scale": 0.1},
+    "Big": {"table": "holding", "address": 44, "dtype": "int64", "scale": 2},
+}
+
+
+@pytest.mark.parametrize(
+    ("tag", "value"),
+    [
+        ("Offset", 1000000000),  # raw 999999999.5; float math accepted it
+        ("Tenths", 300000000.05),  # raw 3000000000.5; float math rounded it
+        ("Big", 2**60 + 1),  # raw 2**59 + 0.5
+    ],
+)
+def test_write_tag_refuses_values_that_are_not_exact_steps(client, tag, value) -> None:
+    ctx = make_ctx(client, EXACT, writes_enabled=True)
+    result = run(cli.write_tag(tag, value, ctx))
+    assert result["success"] is False and "whole number of steps" in result["error"], result
+    assert client.calls == []
+
+
+def test_write_tag_is_exact_for_large_values_and_decimal_steps(client) -> None:
+    ctx = make_ctx(client, EXACT, writes_enabled=True)
+    assert run(cli.write_tag("Big", 2**60 + 2, ctx))["success"]
+    assert codec.decode(client.hr[44:48], "int64") == [2**59 + 1]  # not ...488 via float
+    assert run(cli.write_tag("Tenths", 300000000.1, ctx))["success"]
+    assert codec.decode(client.hr[42:44], "uint32") == [3000000001]
+    assert run(cli.write_tag("Offset", 1000000000.5, ctx))["success"]
+    assert codec.decode(client.hr[40:42], "int32") == [1000000000]
