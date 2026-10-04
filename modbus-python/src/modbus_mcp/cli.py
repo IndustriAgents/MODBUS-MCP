@@ -111,6 +111,8 @@ class AppContext:
     modbus_client: Any
     settings: Settings = field(default_factory=Settings)
     tags: dict[str, Tag] = field(default_factory=dict)
+    # Tool calls can run concurrently; only one of them should reconnect.
+    reconnect_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 # -----------------------------
@@ -186,6 +188,31 @@ async def _with_timeout(coro: Awaitable[Any], timeout: float | None) -> Any:
     return await asyncio.wait_for(coro, timeout=timeout)
 
 
+async def _reconnect(ctx: Context, app: AppContext, op: str) -> bool:
+    """Re-open a dropped connection; True if the client is connected afterwards.
+
+    pymodbus raises ConnectionException while the connection is down and keeps
+    retrying in the background with a back-off of up to 5 minutes. close() stops
+    that loop, so it cannot race the connect() here, and connect() tries now.
+    """
+    client = app.modbus_client
+    async with app.reconnect_lock:
+        if getattr(client, "connected", False):
+            return True  # another call reconnected while this one waited
+        await ctx.info(f"{op}: not connected, reconnecting to {app.settings.target}")
+        try:
+            client.close()
+            await client.connect()
+        except Exception as exc:
+            await ctx.error(f"{op}: reconnect failed: {type(exc).__name__}: {exc}")
+            return False
+        if not getattr(client, "connected", False):
+            await ctx.error(f"{op}: reconnect to {app.settings.target} failed")
+            return False
+        await ctx.info(f"{op}: reconnected to {app.settings.target}")
+        return True
+
+
 async def _retry_call(
     ctx: Context,
     app: AppContext,
@@ -195,8 +222,10 @@ async def _retry_call(
 ) -> tuple[Any | None, str | None, float, int]:
     """Execute call with retries and timeout. Returns (result, error, duration, attempts).
 
-    A connection error triggers a reconnect attempt before the next retry, making the
-    server resilient to transient TCP drops.
+    When the connection is down (pymodbus raises ConnectionException, a
+    ModbusException, rather than ConnectionError/OSError), reconnect before the
+    first attempt and before each retry, so a dropped TCP session or a restarted
+    device does not need a server restart.
     """
     settings = app.settings
     client = app.modbus_client
@@ -206,28 +235,17 @@ async def _retry_call(
     start = time.perf_counter()
     last_err: str | None = None
     while True:
+        if not getattr(client, "connected", True):
+            await _reconnect(ctx, app, op)
         try:
             attempt += 1
             result = await _with_timeout(call_factory(), settings.tool_timeout)
             return result, None, (time.perf_counter() - start) * 1000.0, attempt
-        except (ModbusException, asyncio.TimeoutError) as e:
+        except (ModbusException, asyncio.TimeoutError, ConnectionError, OSError) as e:
             last_err = f"{type(e).__name__}: {e}"
             await ctx.error(f"{op} failed on attempt {attempt}: {last_err}")
             if attempt > max_retries:
                 break
-            backoff = settings.retry_backoff_base * (2 ** (attempt - 1))
-            await asyncio.sleep(backoff)
-        except (ConnectionError, OSError) as e:
-            # TCP connection dropped — attempt reconnect before retrying
-            last_err = f"{type(e).__name__}: {e}"
-            await ctx.error(f"{op} connection error on attempt {attempt}: {last_err}")
-            if attempt > max_retries:
-                break
-            try:
-                await ctx.info(f"{op} attempting reconnect before retry {attempt + 1}")
-                await client.connect()
-            except Exception as reconnect_err:
-                await ctx.error(f"{op} reconnect failed: {reconnect_err}")
             backoff = settings.retry_backoff_base * (2 ** (attempt - 1))
             await asyncio.sleep(backoff)
         except Exception as e:  # unexpected
@@ -1099,41 +1117,50 @@ def _unscale(values: list[Any], tag: Tag) -> list[Any]:
 
 
 @mcp.tool()
-async def ping(ctx: Context, slave_id: SlaveId = None) -> dict[str, Any]:
-    """Return server health and verify end-to-end device reachability.
+async def ping(
+    ctx: Context,
+    slave_id: SlaveId = None,
+    address: Annotated[
+        int,
+        Field(ge=0, le=65535, description="Holding register to probe (default 0)."),
+        BeforeValidator(_reject_bool),
+    ] = 0,
+) -> dict[str, Any]:
+    """Check that the device answers, and report the server's configuration.
 
-    Unlike a socket-level check, this sends a real Modbus request (read 1 holding
-    register at address 0) so it catches cases where the TCP session is open but
-    the device is unresponsive.
+    Reads one holding register (address 0 unless given) as a probe. Any Modbus
+    reply counts as reachable, including an exception reply such as Illegal Data
+    Address from a device without that register; no reply (timeout, connection
+    refused) does not, and then success is false. Reconnects first if the
+    connection had dropped.
     """
     app = _app(ctx)
     settings = app.settings
     client = app.modbus_client
     slave_id = _slave(app, slave_id)
-    socket_connected = bool(getattr(client, "connected", False))
-
-    device_reachable = False
-    probe_error: str | None = None
 
     async def _probe():
-        return await client.read_holding_registers(address=0, count=1, **_unit(client, slave_id))
+        return await client.read_holding_registers(
+            address=address, count=1, **_unit(client, slave_id)
+        )
 
-    probe_result, probe_err, probe_ms, _ = await _retry_call(
-        ctx, app, "ping_probe", _probe, max_retries=0
-    )
-    probe_latency_ms = round(probe_ms, 3)
-    if probe_err is not None:
-        probe_error = probe_err
-    elif _is_error(probe_result):
-        probe_error = str(probe_result)
+    result, probe_error, probe_ms, _ = await _retry_call(ctx, app, "ping", _probe, max_retries=0)
+    device_reachable = probe_error is None
+    if probe_error is not None:
+        probe_response = None
+    elif _is_error(result):
+        probe_response = _device_error(result)[0]
     else:
-        device_reachable = True
+        probe_response = "ok"
 
     network = settings.modbus_type in {"tcp", "udp"}
     status = {
-        "socket_connected": socket_connected,
+        "connected": bool(getattr(client, "connected", False)),
         "device_reachable": device_reachable,
-        "probe_latency_ms": probe_latency_ms,
+        "probe_address": address,
+        "probe_slave_id": slave_id,
+        "probe_response": probe_response,
+        "probe_latency_ms": round(probe_ms, 3),
         "probe_error": probe_error,
         "type": settings.modbus_type,
         "host": settings.host if network else None,
@@ -1144,6 +1171,5 @@ async def ping(ctx: Context, slave_id: SlaveId = None) -> dict[str, Any]:
         "tool_timeout": settings.tool_timeout,
         "tag_count": len(app.tags),
     }
-    return _make_result(
-        device_reachable, data=status, error=probe_error if not device_reachable else None
-    )
+    error = None if device_reachable else f"Device at {settings.target} did not answer: {probe_error}"
+    return _make_result(device_reachable, data=status, error=error)
