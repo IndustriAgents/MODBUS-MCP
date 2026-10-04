@@ -7,6 +7,8 @@ is down, so it never ran. These tests use that exception.
 
 from __future__ import annotations
 
+import asyncio
+
 from conftest import FakeResponse, make_ctx, run
 from pymodbus.exceptions import ConnectionException, ModbusIOException
 
@@ -114,3 +116,32 @@ def test_ping_can_probe_another_address(client, ctx) -> None:
         "read_holding_registers",
         {"address": 7, "count": 1, "device_id": 3},
     )
+
+
+def test_ping_without_a_reachable_device(client) -> None:
+    client.connected = False
+
+    async def refuse() -> bool:
+        return False
+
+    client.connect = refuse
+    ctx = make_ctx(client)
+    result = run(cli.ping(ctx))
+    assert result["success"] is False
+    assert result["error"] == "cannot reach device at 127.0.0.1:502"
+    assert result["data"]["connected"] is False and result["data"]["device_reachable"] is False
+    assert client.calls == []
+
+
+def test_the_server_starts_without_a_reachable_device(monkeypatch) -> None:
+    from conftest import free_port
+
+    from modbus_mcp.config import Settings
+
+    monkeypatch.setattr(cli, "_config", (Settings(port=free_port()), {}))
+
+    async def start():
+        async with cli.app_lifespan(cli.mcp) as app:
+            return app.modbus_client.connected
+
+    assert asyncio.run(start()) is False

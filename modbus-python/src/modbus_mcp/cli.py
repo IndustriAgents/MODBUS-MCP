@@ -10,6 +10,7 @@ import asyncio
 import functools
 import inspect
 import json
+import logging
 import math
 import sys
 import time
@@ -29,6 +30,8 @@ from pymodbus.exceptions import ConnectionException, ModbusException
 
 from . import __version__, codec
 from .config import ConfigError, Settings, Tag, load_tag_map
+
+log = logging.getLogger("modbus_mcp")  # stderr, via FastMCP's logging setup
 
 WRITES_DISABLED = (
     "Writes are disabled by configuration (set MODBUS_WRITES_ENABLED=true to allow them)"
@@ -421,14 +424,25 @@ def _make_client(settings: Settings) -> Any:
 
 @asynccontextmanager
 async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
-    """Connect to the configured device for the lifetime of the server."""
+    """Create the Modbus client and try to connect; an unreachable device is not fatal.
+
+    The server starts either way, so initialize and tools/list work. Until the
+    device answers, the device tools return success: false "cannot reach device
+    at ..."; every call tries to connect again (see _retry_call/_reconnect).
+    """
     settings, tags = _config if _config is not None else load_config()
     client = _make_client(settings)
-    await client.connect()
-    if not getattr(client, "connected", False):
-        client.close()
-        raise RuntimeError(
-            f"Failed to connect to Modbus {settings.modbus_type} device at {settings.target}"
+    try:
+        await client.connect()
+    except Exception as exc:  # e.g. a serial port that cannot be opened
+        log.warning("Connecting to %s failed: %s: %s", settings.target, type(exc).__name__, exc)
+    if getattr(client, "connected", False):
+        log.info("Connected to Modbus %s device at %s", settings.modbus_type, settings.target)
+    else:
+        log.warning(
+            "Cannot reach Modbus %s device at %s yet; tool calls will keep trying",
+            settings.modbus_type,
+            settings.target,
         )
     try:
         yield AppContext(modbus_client=client, settings=settings, tags=tags)
@@ -484,7 +498,8 @@ mcp = ModbusMCP(
         "Tools for one Modbus device. Every tool returns {success, data, error, meta}; "
         "check success before using data. Addresses are zero-based (holding register "
         "40001 is address 0). Write tools only work when the server was started with "
-        "MODBUS_WRITES_ENABLED=true."
+        "MODBUS_WRITES_ENABLED=true. If the device cannot be reached, tools return "
+        "success=false with 'cannot reach device' and try again on the next call."
     ),
     dependencies=["pymodbus"],
     lifespan=app_lifespan,
@@ -1176,8 +1191,9 @@ async def ping(
     Reads one holding register (address 0 unless given) as a probe. Any Modbus
     reply counts as reachable, including an exception reply such as Illegal Data
     Address from a device without that register; no reply (timeout, connection
-    refused) does not, and then success is false. Reconnects first if the
-    connection had dropped.
+    refused) does not, and then success is false. Connects first if the server
+    is not connected (the device was unreachable at startup, or the connection
+    dropped); if that fails, the error is "cannot reach device at ...".
     """
     app = _app(ctx)
     settings = app.settings
@@ -1189,7 +1205,10 @@ async def ping(
             address=address, count=1, **_unit(client, slave_id)
         )
 
-    result, probe_error, probe_ms, _ = await _retry_call(ctx, app, "ping", _probe, max_retries=0)
+    details: dict[str, Any] = {}
+    result, probe_error, probe_ms, _ = await _retry_call(
+        ctx, app, "ping", _probe, max_retries=0, details=details
+    )
     device_reachable = probe_error is None
     if probe_error is not None:
         probe_response = None
@@ -1216,7 +1235,10 @@ async def ping(
         "tool_timeout": settings.tool_timeout,
         "tag_count": len(app.tags),
     }
-    error = (
-        None if device_reachable else f"Device at {settings.target} did not answer: {probe_error}"
-    )
-    return _make_result(device_reachable, data=status, error=error)
+    if device_reachable:
+        error = None
+    elif probe_error.startswith("cannot reach device"):
+        error = probe_error
+    else:
+        error = f"Device at {settings.target} did not answer: {probe_error}"
+    return _make_result(device_reachable, data=status, error=error, meta=details)

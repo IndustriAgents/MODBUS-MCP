@@ -10,6 +10,7 @@ import subprocess
 import sys
 from importlib.metadata import version
 from pathlib import Path
+from types import SimpleNamespace
 
 import anyio
 import pytest
@@ -316,29 +317,89 @@ def test_stdout_carries_only_json_rpc(mock, tmp_path) -> None:
     assert envelopes[6]["success"] is False and "Invalid arguments" in envelopes[6]["error"]
 
 
-def test_unreachable_device_fails_at_startup_with_clean_stdout(tmp_path) -> None:
+async def test_starts_without_a_device_and_connects_when_it_appears(tmp_path) -> None:
+    port = free_port()  # nothing listens here yet
+    target = SimpleNamespace(host="127.0.0.1", port=port)
+    async with server(target, tmp_path, MODBUS_WRITES_ENABLED="true") as srv:
+        assert srv.init.serverInfo.name == "Modbus MCP Server"
+        assert len((await srv.session.list_tools()).tools) == 17
+
+        unreachable = f"cannot reach device at 127.0.0.1:{port}"
+        down = await srv.call("read_register", address=0)
+        assert down["success"] is False and down["error"] == unreachable
+        write = await srv.call("write_register", address=1, value=5)
+        assert write["success"] is False and write["error"] == unreachable  # nothing was sent
+        ping = await srv.call("ping")
+        assert ping["success"] is False and ping["error"] == unreachable
+        assert ping["data"]["connected"] is False and ping["data"]["device_reachable"] is False
+
+        with running_mock(tmp_path, port=port):
+            up = await srv.call("read_register", address=0)
+            assert up["success"], up
+            assert up["data"] == {"value": 50}
+            assert (await srv.call("ping"))["data"]["device_reachable"] is True
+    assert "Cannot reach Modbus tcp device" in srv.stderr.read_text()
+
+
+def test_stdout_is_clean_without_a_device(tmp_path) -> None:
     port = free_port()  # nothing listens here
     env = {k: v for k, v in os.environ.items() if not k.startswith(SERVER_VARS)}
-    env.update(MODBUS_HOST="127.0.0.1", MODBUS_PORT=str(port))
-    init = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": {"name": "pytest", "version": "0"},
+    env.update(MODBUS_HOST="127.0.0.1", MODBUS_PORT=str(port), MODBUS_RETRY_BACKOFF_BASE="0")
+    messages = [
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "pytest", "version": "0"},
+            },
         },
-    }
-    proc = subprocess.run(
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+        {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": "read_register", "arguments": {"address": 0}},
+        },
+    ]
+    proc = subprocess.Popen(
         [sys.executable, "-m", "modbus_mcp"],
         env=env,
-        input=json.dumps(init) + "\n",
-        capture_output=True,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=60,
     )
-    assert proc.returncode != 0
-    assert f"Failed to connect to Modbus tcp device at 127.0.0.1:{port}" in proc.stderr
-    for line in proc.stdout.splitlines():
+    try:
+        responses = {}
+        for message in messages:
+            proc.stdin.write(json.dumps(message) + "\n")
+            proc.stdin.flush()
+            while "id" in message and message["id"] not in responses:
+                line = proc.stdout.readline()
+                assert line, proc.stderr.read()
+                reply = json.loads(line)
+                assert reply["jsonrpc"] == "2.0"
+                if "id" in reply:
+                    responses[reply["id"]] = reply
+        proc.stdin.close()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:  # mcp < 1.10 does not exit on EOF
+            proc.terminate()
+            proc.wait(timeout=10)
+        rest = proc.stdout.read()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+    for line in rest.splitlines():
         assert json.loads(line)["jsonrpc"] == "2.0"
+    assert responses[1]["result"]["serverInfo"]["name"] == "Modbus MCP Server"
+    assert len(responses[2]["result"]["tools"]) == 17
+    envelope = json.loads(responses[3]["result"]["content"][0]["text"])
+    assert envelope["success"] is False
+    assert envelope["error"] == f"cannot reach device at 127.0.0.1:{port}"
