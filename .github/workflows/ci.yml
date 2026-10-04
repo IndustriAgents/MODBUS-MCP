@@ -66,11 +66,12 @@ jobs:
         run: uv run --locked pytest -v
 
   server-lowest:
-    # The supported ranges in pyproject.toml start at mcp 1.6.0 and pymodbus
-    # 3.9.2 (which still uses `slave=` and has pymodbus.payload, which the codec
-    # test compares against). The lockfile pins the newest releases, so check
-    # the bottom of the range here.
-    name: MCP server on the lowest supported mcp and pymodbus
+    # The lockfile pins the newest releases. This job installs the LOWEST
+    # version allowed for every direct dependency in pyproject.toml (mcp 1.6.0,
+    # pymodbus[serial] 3.9.2, python-dotenv 1.1.0, and pytest 8.0) and runs the
+    # same tests, so the declared floors stay honest. pymodbus 3.9 still uses
+    # `slave=` and has pymodbus.payload, which the codec test compares against.
+    name: MCP server on the lowest direct dependencies
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -82,11 +83,11 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
 
-      - name: Install dependencies from uv.lock
-        run: uv sync --locked
-
-      - name: Downgrade to mcp 1.6.0 and pymodbus 3.9.2
-        run: uv pip install "mcp[cli]==1.6.0" "pymodbus==3.9.2"
+      - name: Install the lowest direct dependencies
+        run: |
+          uv venv --python 3.10 .venv
+          uv pip install --resolution lowest-direct -e . "pytest>=8"
+          uv pip list | grep -Ei '^(mcp|pymodbus|python-dotenv|pyserial|pytest) '
 
       - name: Tests (unit, and integration against the mock device)
         run: uv run --no-sync pytest -v
