@@ -67,10 +67,11 @@ jobs:
 
   server-lowest:
     # The lockfile pins the newest releases. This job installs the LOWEST
-    # version allowed for every direct dependency in pyproject.toml (mcp 1.6.0,
-    # pymodbus[serial] 3.9.2, python-dotenv 1.1.0, and pytest 8.0) and runs the
-    # same tests, so the declared floors stay honest. pymodbus 3.9 still uses
-    # `slave=` and has pymodbus.payload, which the codec test compares against.
+    # version allowed for every direct dependency in pyproject.toml (mcp 1.12.3,
+    # pymodbus[serial] 3.9.2, python-dotenv 1.1.0, anyio 4.5, pydantic 2.8,
+    # exceptiongroup 1.0.2 on Python 3.10, and pytest 8.0) and runs the same
+    # tests, so the declared floors stay honest. pymodbus 3.9 still uses `slave=`
+    # and has pymodbus.payload, which the codec test compares against.
     name: MCP server on the lowest direct dependencies
     runs-on: ubuntu-latest
     defaults:
@@ -86,8 +87,10 @@ jobs:
       - name: Install the lowest direct dependencies
         run: |
           uv venv --python 3.10 .venv
-          uv pip install --resolution lowest-direct -e . "pytest>=8"
-          uv pip list | grep -Ei '^(mcp|pymodbus|python-dotenv|pyserial|pytest) '
+          # lowest-direct resolves transitive dependencies at their newest, and the
+          # newest sse-starlette (via mcp) needs anyio 4.7; pin anyio to its own floor.
+          uv pip install --resolution lowest-direct -e . "pytest>=8" "anyio==4.5.0"
+          uv pip list | grep -Ei '^(mcp|pymodbus|python-dotenv|pyserial|anyio|pydantic|exceptiongroup|pytest) '
 
       - name: Tests (unit, and integration against the mock device)
         run: uv run --no-sync pytest -v

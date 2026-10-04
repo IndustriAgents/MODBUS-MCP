@@ -1,7 +1,7 @@
 """A simulated Modbus TCP device for testing modbus-mcp without real equipment.
 
 The register map is documented in README.md; the initial values below are at
-the addresses it lists. Runs on pymodbus 3.10-3.12 (see pyproject.toml).
+the addresses it lists. Runs on pymodbus 3.11.1-3.12 (see pyproject.toml).
 """
 
 import argparse
