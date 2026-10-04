@@ -1,24 +1,55 @@
+"""A simulated Modbus TCP device for testing modbus-mcp without real equipment.
+
+The register map is documented in README.md; the initial values below are at
+the addresses it lists. Runs on pymodbus 3.10-3.12 (see pyproject.toml).
+"""
+
 import asyncio
 import contextlib
+import logging
 import os
 import random
-import signal
-import time
-from typing import List
+import sys
 
-from pymodbus.server import StartAsyncTcpServer
-from pymodbus.datastore import ModbusDeviceContext, ModbusServerContext
-from pymodbus.datastore import ModbusSequentialDataBlock
+from pymodbus.datastore import (
+    ModbusDeviceContext,
+    ModbusSequentialDataBlock,
+    ModbusServerContext,
+)
 from pymodbus.pdu.device import ModbusDeviceIdentification
+from pymodbus.server import StartAsyncTcpServer
+
+log = logging.getLogger("modbus_mock")
+
+DEFAULT_HOST = "0.0.0.0"
+DEFAULT_PORT = 1502
+DEFAULT_UPDATE_INTERVAL = 1.0
+
+# Entries per table: protocol addresses 0..99.
+TABLE_SIZE = 100
+
+# Function codes used to address each table through the device context.
+COILS, DISCRETE_INPUTS, HOLDING_REGISTERS, INPUT_REGISTERS = 1, 2, 3, 4
+
+INITIAL_HOLDING = [
+    50,  # 0: valve position (0-100)
+    0,  # 1: heater power (0-100)
+    0,  # 2: fan speed (0-100)
+    0,  # 3: conveyor speed (0-100)
+    0,  # 4: production rate setpoint (units/hour)
+    0,  # 5: system mode (0=MANUAL, 1=AUTO, 2=MAINT)
+    0,  # 6: command start
+    0,  # 7: command stop
+    0,  # 8: command emergency stop
+    0,  # 9: command reset
+]
+INITIAL_COILS = [
+    0,  # 0: pump enabled
+    0,  # 1: alarm active (written by the simulation)
+]
 
 
-# Configuration
-HOST = os.environ.get("MODBUS_HOST", "0.0.0.0")
-PORT = int(os.environ.get("MODBUS_PORT", 1502))
-UPDATE_INTERVAL = float(os.environ.get("UPDATE_INTERVAL", 1.0))
-
-
-def clamp_int(value: int, min_v: int = 0, max_v: int = 0xFFFF) -> int:
+def clamp_int(value: float, min_v: int = 0, max_v: int = 0xFFFF) -> int:
     return max(min_v, min(max_v, int(value)))
 
 
@@ -26,206 +57,189 @@ def to_reg(value: float, scale: float = 1.0, min_v: int = 0, max_v: int = 0xFFFF
     return clamp_int(round(value * scale), min_v, max_v)
 
 
+INITIAL_INPUTS = [
+    to_reg(25.0, 10),  # 0: temperature x10
+    to_reg(1013.0, 1),  # 1: pressure (hPa)
+    to_reg(0.0, 1),  # 2: flow rate (L/min)
+    to_reg(75.0, 10),  # 3: tank level x10
+    to_reg(0.3, 100),  # 4: vibration x100
+    to_reg(7.2, 100),  # 5: pH x100
+    to_reg(45.0, 10),  # 6: humidity x10
+    to_reg(0.0, 1),  # 7: motor speed (RPM)
+    to_reg(0.0, 1),  # 8: total production (wraps at 65536)
+]
+INITIAL_DISCRETE = [
+    0,  # 0: emergency stop active
+    0,  # 1: system running
+]
+
+
+def _block() -> ModbusSequentialDataBlock:
+    # ModbusDeviceContext adds 1 to every protocol address before it reaches a
+    # block, so a block that starts at 1 serves protocol addresses 0..TABLE_SIZE-1.
+    return ModbusSequentialDataBlock(1, [0] * TABLE_SIZE)
+
+
 def build_context() -> ModbusServerContext:
-    """Create a Modbus context with initial values and zero-based addressing."""
-    # 100 values per table to start
-    di = ModbusSequentialDataBlock(0, [0] * 100)  # Discrete Inputs
-    co = ModbusSequentialDataBlock(0, [0] * 100)  # Coils
-    hr = ModbusSequentialDataBlock(0, [0] * 100)  # Holding Registers
-    ir = ModbusSequentialDataBlock(0, [0] * 100)  # Input Registers
-
-    # Initial setpoints / states
-    # Holding Registers (RW)
-    hr_values = [0] * 100
-    hr_values[0] = 50   # valve position
-    hr_values[1] = 0    # heater power
-    hr_values[2] = 0    # fan speed
-    hr_values[3] = 0    # conveyor speed
-    hr_values[4] = 0    # production rate setpoint
-    hr_values[5] = 0    # system mode (0=MANUAL)
-    # commands 6..9 default 0
-    hr.setValues(0, hr_values)
-
-    # Coils (RW)
-    co_values = [0] * 100
-    co_values[0] = 0  # pump_enabled
-    co_values[1] = 0  # alarm_active (written by simulation)
-    co.setValues(0, co_values)
-
-    # Input Registers (RO sensors) — initialize sensible defaults
-    ir_values = [0] * 100
-    ir_values[0] = to_reg(25.0, 10)    # temperature x10
-    ir_values[1] = to_reg(1013.0, 1)   # pressure
-    ir_values[2] = to_reg(0.0, 1)      # flow
-    ir_values[3] = to_reg(75.0, 10)    # tank level x10
-    ir_values[4] = to_reg(0.3, 100)    # vibration x100
-    ir_values[5] = to_reg(7.2, 100)    # pH x100
-    ir_values[6] = to_reg(45.0, 10)    # humidity x10
-    ir_values[7] = to_reg(0.0, 1)      # motor speed
-    ir_values[8] = to_reg(0.0, 1)      # total production (wraps)
-    ir.setValues(0, ir_values)
-
-    # Discrete Inputs (RO)
-    di_values = [0] * 100
-    di_values[0] = 0  # emergency stop
-    di_values[1] = 0  # running
-    di.setValues(0, di_values)
-
-    device = ModbusDeviceContext(di=di, co=co, hr=hr, ir=ir)
-    # In single-device mode pymodbus expects the device context directly, not a dict.
-    context = ModbusServerContext(devices=device, single=True)
-    return context
+    """Create the datastore, with the initial values at their documented addresses."""
+    device = ModbusDeviceContext(di=_block(), co=_block(), hr=_block(), ir=_block())
+    # Seed through the device context, i.e. through the same address mapping a
+    # client request goes through. (Writing to the blocks directly put every
+    # value one address too low: Valve Position read 0 instead of 50.)
+    for function_code, values in (
+        (HOLDING_REGISTERS, INITIAL_HOLDING),
+        (COILS, INITIAL_COILS),
+        (INPUT_REGISTERS, INITIAL_INPUTS),
+        (DISCRETE_INPUTS, INITIAL_DISCRETE),
+    ):
+        if device.setValues(function_code, 0, list(values)) is not None:
+            raise RuntimeError(f"could not seed table for function code {function_code}")
+    # With single=True pymodbus wants the device context itself; a {0: device}
+    # dict gets wrapped again, and every request then fails with exception 4.
+    return ModbusServerContext(devices=device, single=True)
 
 
-async def simulation_loop(context: ModbusServerContext) -> None:
+def _step(context: ModbusServerContext, state: dict) -> None:
+    """Advance the simulation by one tick: process commands, update sensors."""
+    device = context[0]  # single=True: every unit id maps to the same device
+
+    # Read controls / setpoints
+    pump_enabled = bool(device.getValues(COILS, 0, count=1)[0])
+    vals_hr = device.getValues(HOLDING_REGISTERS, 0, count=10)
+    valve_pos = clamp_int(vals_hr[0], 0, 100)
+    heater_power = clamp_int(vals_hr[1], 0, 100)
+    conveyor_speed = clamp_int(vals_hr[3], 0, 100)
+    prod_rate_sp = clamp_int(vals_hr[4], 0, 1000)
+    system_mode = clamp_int(vals_hr[5], 0, 2)  # 0=MANUAL,1=AUTO,2=MAINT
+    cmd_start, cmd_stop, cmd_e_stop, cmd_reset = (v > 0 for v in vals_hr[6:10])
+
+    # Process commands, clearing each one once handled
+    if cmd_start:
+        system_mode = 1  # AUTO
+        pump_enabled = True
+        conveyor_speed = max(conveyor_speed, min(prod_rate_sp * 2, 100))
+        device.setValues(HOLDING_REGISTERS, 6, [0])
+    if cmd_stop:
+        system_mode = 0  # MANUAL
+        pump_enabled = False
+        conveyor_speed = 0
+        device.setValues(HOLDING_REGISTERS, 7, [0])
+    if cmd_e_stop:
+        system_mode = 2  # MAINT
+        pump_enabled = False
+        conveyor_speed = 0
+        device.setValues(HOLDING_REGISTERS, 8, [0])
+    if cmd_reset:
+        system_mode = 0  # MANUAL
+        state["total_production"] = 0.0
+        device.setValues(HOLDING_REGISTERS, 9, [0])
+
+    # Apply possibly updated controls back to the stores
+    device.setValues(COILS, 0, [1 if pump_enabled else 0])
+    device.setValues(HOLDING_REGISTERS, 3, [conveyor_speed])
+    device.setValues(HOLDING_REGISTERS, 5, [system_mode])
+
+    # Discrete inputs (status)
+    di_vals = device.getValues(DISCRETE_INPUTS, 0, count=2)
+    emergency_stop = di_vals[0] == 1 or (system_mode == 2)
+    running = (system_mode == 1) and not emergency_stop and (prod_rate_sp > 0)
+
+    # Temperature influenced by heater power
+    temperature = 25.0 + (heater_power * 0.5) + random.uniform(-2.0, 2.0)
+
+    # Pressure influenced by pump and valve
+    base_pressure = 1013.0 + (50.0 if pump_enabled else 0.0) - (valve_pos - 50.0) * 0.5
+    pressure = base_pressure + random.uniform(-5.0, 5.0)
+
+    # Flow rate influenced by pump and valve
+    base_flow = 150.0 * (valve_pos / 100.0) if pump_enabled else 0.0
+    flow_rate = max(0.0, base_flow + random.uniform(-10.0, 10.0))
+
+    # Tank level dynamics
+    tank_level = device.getValues(INPUT_REGISTERS, 3, count=1)[0] / 10.0
+    level_change = (flow_rate - prod_rate_sp) * 0.01
+    tank_level = max(0.0, min(100.0, tank_level + level_change + random.uniform(-0.5, 0.5)))
+
+    # Vibration influenced by conveyor and production
+    base_vibration = (conveyor_speed / 100.0) * 0.2 + (prod_rate_sp / 100.0) * 0.2
+    vibration = base_vibration + random.uniform(-0.1, 0.1)
+
+    # pH with slow drift
+    ph_level = device.getValues(INPUT_REGISTERS, 5, count=1)[0] / 100.0
+    ph_level = max(6.0, min(8.0, ph_level + random.uniform(-0.05, 0.05)))
+
+    # Humidity influenced by temperature
+    base_humidity = 45.0 - (temperature - 25.0) * 2.0
+    humidity = max(20.0, min(80.0, base_humidity + random.uniform(-3.0, 3.0)))
+
+    # Motor speed influenced by production
+    motor_speed = 0.0
+    if running:
+        motor_speed = 1500.0 + (prod_rate_sp * 10.0) + random.uniform(-50.0, 50.0)
+
+    # Production accumulation
+    if running and not emergency_stop:
+        state["total_production"] += prod_rate_sp / 3600.0
+
+    # Alarms
+    alarm_active = temperature > 80.0 or pressure > 1200.0 or tank_level < 10.0 or vibration > 2.0
+
+    if temperature > 100.0 or pressure > 1300.0:
+        emergency_stop = True
+        running = False
+
+    # Write updated status back
+    device.setValues(DISCRETE_INPUTS, 0, [1 if emergency_stop else 0])
+    device.setValues(DISCRETE_INPUTS, 1, [1 if running else 0])
+    device.setValues(COILS, 1, [1 if alarm_active else 0])
+
+    # Input registers (sensors)
+    device.setValues(
+        INPUT_REGISTERS,
+        0,
+        [
+            to_reg(temperature, 10),
+            to_reg(pressure, 1),
+            to_reg(flow_rate, 1),
+            to_reg(tank_level, 10),
+            to_reg(vibration, 100),
+            to_reg(ph_level, 100),
+            to_reg(humidity, 10),
+            to_reg(motor_speed, 1),
+            to_reg(state["total_production"], 1) % 65536,
+        ],
+    )
+
+
+async def simulation_loop(
+    context: ModbusServerContext, interval: float = DEFAULT_UPDATE_INTERVAL
+) -> None:
     """Background loop to update sensor values and process commands."""
-    unit_id = 0x00  # 'single=True' context ignores unit, but 0x00 is conventional
-    total_production_acc = 0.0
-
+    state = {"total_production": 0.0}
+    last_error = None
     while True:
         try:
-            # Read controls / setpoints
-            # Coils
-            pump_enabled = bool(context[unit_id].getValues(1, 0, count=1)[0])
-
-            # Holding registers
-            vals_hr: List[int] = context[unit_id].getValues(3, 0, count=10)
-            valve_pos = clamp_int(vals_hr[0], 0, 100)
-            heater_power = clamp_int(vals_hr[1], 0, 100)
-            fan_speed = clamp_int(vals_hr[2], 0, 100)
-            conveyor_speed = clamp_int(vals_hr[3], 0, 100)
-            prod_rate_sp = clamp_int(vals_hr[4], 0, 1000)
-            system_mode = clamp_int(vals_hr[5], 0, 2)  # 0=MANUAL,1=AUTO,2=MAINT
-            cmd_start = vals_hr[6] > 0
-            cmd_stop = vals_hr[7] > 0
-            cmd_e_stop = vals_hr[8] > 0
-            cmd_reset = vals_hr[9] > 0
-
-            # Process commands
-            if cmd_start:
-                system_mode = 1  # AUTO
-                pump_enabled = True
-                conveyor_speed = max(conveyor_speed, min(prod_rate_sp * 2, 100))
-                # clear command
-                context[unit_id].setValues(3, 6, [0])
-            if cmd_stop:
-                system_mode = 0  # MANUAL
-                pump_enabled = False
-                conveyor_speed = 0
-                context[unit_id].setValues(3, 7, [0])
-            if cmd_e_stop:
-                system_mode = 2  # MAINT
-                pump_enabled = False
-                conveyor_speed = 0
-                # set alarm and e-stop below
-                context[unit_id].setValues(3, 8, [0])
-            if cmd_reset:
-                system_mode = 0  # MANUAL
-                # clear alarm and e-stop below
-                total_production_acc = 0.0
-                context[unit_id].setValues(3, 9, [0])
-
-            # Apply possibly updated controls back to stores
-            context[unit_id].setValues(1, 0, [1 if pump_enabled else 0])  # coil 0
-            context[unit_id].setValues(3, 3, [conveyor_speed])
-            context[unit_id].setValues(3, 5, [system_mode])
-
-            # Discrete Inputs (status)
-            di_vals = context[unit_id].getValues(2, 0, count=2)
-            emergency_stop = di_vals[0] == 1 or (system_mode == 2)
-            running = (system_mode == 1) and not emergency_stop and (prod_rate_sp > 0)
-
-            # Simulate process
-            # Temperature influenced by heater power
-            base_temp = 25.0 + (heater_power * 0.5)
-            temperature = base_temp + random.uniform(-2.0, 2.0)
-
-            # Pressure influenced by pump and valve
-            base_pressure = 1013.0
-            if pump_enabled:
-                base_pressure += 50.0
-            base_pressure -= (valve_pos - 50.0) * 0.5
-            pressure = base_pressure + random.uniform(-5.0, 5.0)
-
-            # Flow rate influenced by pump and valve
-            if pump_enabled:
-                base_flow = 150.0 * (valve_pos / 100.0)
-            else:
-                base_flow = 0.0
-            flow_rate = max(0.0, base_flow + random.uniform(-10.0, 10.0))
-
-            # Tank level dynamics
-            tank_level_reg = context[unit_id].getValues(4, 3, count=1)[0]
-            tank_level = tank_level_reg / 10.0
-            level_change = (flow_rate - prod_rate_sp) * 0.01
-            tank_level = max(0.0, min(100.0, tank_level + level_change + random.uniform(-0.5, 0.5)))
-
-            # Vibration influenced by motor + conveyor
-            base_vibration = (conveyor_speed / 100.0) * 0.2 + (prod_rate_sp / 100.0) * 0.2
-            vibration = base_vibration + random.uniform(-0.1, 0.1)
-
-            # pH with slow drift
-            ph_level_reg = context[unit_id].getValues(4, 5, count=1)[0]
-            ph_level = ph_level_reg / 100.0
-            ph_level += random.uniform(-0.05, 0.05)
-            ph_level = max(6.0, min(8.0, ph_level))
-
-            # Humidity influenced by temperature
-            base_humidity = 45.0 - (temperature - 25.0) * 2.0
-            humidity = max(20.0, min(80.0, base_humidity + random.uniform(-3.0, 3.0)))
-
-            # Motor speed influenced by production
-            motor_speed = 0.0
-            if running:
-                motor_speed = 1500.0 + (prod_rate_sp * 10.0) + random.uniform(-50.0, 50.0)
-
-            # Production accumulation
-            if running and not emergency_stop:
-                total_production_acc += prod_rate_sp / 3600.0
-
-            # Alarms
-            alarm_active = (
-                temperature > 80.0 or
-                pressure > 1200.0 or
-                tank_level < 10.0 or
-                vibration > 2.0
-            )
-
-            if temperature > 100.0 or pressure > 1300.0:
-                emergency_stop = True
-                running = False
-                system_mode = 2  # MAINT
-                pump_enabled = False
-                conveyor_speed = 0
-
-            # Write updated status back to context
-            context[unit_id].setValues(2, 0, [1 if emergency_stop else 0])  # DI0
-            context[unit_id].setValues(2, 1, [1 if running else 0])        # DI1
-            context[unit_id].setValues(1, 1, [1 if alarm_active else 0])   # CO1 alarm
-
-            # Input registers (sensors)
-            context[unit_id].setValues(4, 0, [to_reg(temperature, 10)])
-            context[unit_id].setValues(4, 1, [to_reg(pressure, 1)])
-            context[unit_id].setValues(4, 2, [to_reg(flow_rate, 1)])
-            context[unit_id].setValues(4, 3, [to_reg(tank_level, 10)])
-            context[unit_id].setValues(4, 4, [to_reg(vibration, 100)])
-            context[unit_id].setValues(4, 5, [to_reg(ph_level, 100)])
-            context[unit_id].setValues(4, 6, [to_reg(humidity, 10)])
-            context[unit_id].setValues(4, 7, [to_reg(motor_speed, 1)])
-            context[unit_id].setValues(4, 8, [to_reg(total_production_acc, 1) % 65536])
-
-            await asyncio.sleep(UPDATE_INTERVAL)
-        except asyncio.CancelledError:
-            break
-        except Exception:
-            # Avoid crashing the loop on simulation errors
-            await asyncio.sleep(UPDATE_INTERVAL)
+            _step(context, state)
+            if last_error is not None:
+                log.info("Simulation recovered")
+                last_error = None
+        except Exception as exc:
+            # Keep simulating, but say why a step failed (once per distinct error):
+            # swallowing these silently is how a broken datastore went unnoticed.
+            error = f"{type(exc).__name__}: {exc}"
+            if error != last_error:
+                log.exception("Simulation step failed; retrying every %ss", interval)
+                last_error = error
+        await asyncio.sleep(interval)
 
 
-async def run_server() -> None:
+async def run_server(
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
+    interval: float = DEFAULT_UPDATE_INTERVAL,
+) -> None:
     context = build_context()
 
-    # Identity (optional)
     identity = ModbusDeviceIdentification()
     identity.VendorName = "Mock ICS"
     identity.ProductCode = "MODBUS-MOCK"
@@ -234,26 +248,40 @@ async def run_server() -> None:
     identity.ModelName = "ModbusSim v0.1"
     identity.MajorMinorRevision = "0.1"
 
-    # Start the simulation loop alongside the server
-    sim_task = asyncio.create_task(simulation_loop(context))
+    sim_task = asyncio.create_task(simulation_loop(context, interval))
     try:
-        await StartAsyncTcpServer(
-            context=context,
-            identity=identity,
-            address=(HOST, PORT),
-        )
+        await StartAsyncTcpServer(context=context, identity=identity, address=(host, port))
     finally:
         sim_task.cancel()
-        with contextlib.suppress(Exception):  # type: ignore
+        with contextlib.suppress(asyncio.CancelledError):
             await sim_task
 
 
-def main() -> None:
-    print(f"Starting Modbus Mock Server on {HOST}:{PORT} ...")
+def _settings_from_env() -> tuple[str, int, float]:
+    host = os.environ.get("MODBUS_HOST", "").strip() or DEFAULT_HOST
     try:
-        asyncio.run(run_server())
+        port = int(os.environ.get("MODBUS_PORT", "").strip() or DEFAULT_PORT)
+        interval = float(os.environ.get("UPDATE_INTERVAL", "").strip() or DEFAULT_UPDATE_INTERVAL)
+    except ValueError as exc:
+        raise SystemExit(f"modbus-mock-server: invalid setting: {exc}") from None
+    if not 1 <= port <= 65535:
+        raise SystemExit(f"modbus-mock-server: MODBUS_PORT must be 1-65535, got {port}")
+    if not interval > 0:
+        raise SystemExit(f"modbus-mock-server: UPDATE_INTERVAL must be > 0, got {interval}")
+    return host, port, interval
+
+
+def main() -> None:
+    """Entry point of `modbus-mock-server`. Settings come from the environment."""
+    logging.basicConfig(
+        level=logging.INFO, stream=sys.stderr, format="%(asctime)s %(levelname)s %(message)s"
+    )
+    host, port, interval = _settings_from_env()
+    log.info("Starting Modbus Mock Server on %s:%s ...", host, port)
+    try:
+        asyncio.run(run_server(host, port, interval))
     except KeyboardInterrupt:
-        print("\nServer stopped by user.")
+        log.info("Server stopped by user.")
 
 
 if __name__ == "__main__":

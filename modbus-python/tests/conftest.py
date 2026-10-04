@@ -3,7 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import os
+import shutil
+import signal
+import socket
+import subprocess
+import time
 from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -199,3 +208,88 @@ def ctx(client: FakeClient) -> FakeContext:
 def wctx(client: FakeClient) -> FakeContext:
     """Writes enabled."""
     return make_ctx(client, writes_enabled=True)
+
+
+# --- the mock device, as a real process --------------------------------------------------
+
+MOCK_DIR = Path(__file__).resolve().parents[2] / "modbus-mock-server"
+
+
+def free_port() -> int:
+    """A TCP port nothing is listening on (the OS picks it), so parallel runs do not clash."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+@dataclass
+class MockDevice:
+    host: str
+    port: int
+    process: subprocess.Popen
+    log_path: Path
+
+    def log(self) -> str:
+        return self.log_path.read_text(errors="replace")
+
+
+def _stop(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    # `uv run` starts the mock as a child; signal the whole process group.
+    with contextlib.suppress(ProcessLookupError):
+        if hasattr(os, "killpg"):
+            os.killpg(process.pid, signal.SIGTERM)
+        else:  # pragma: no cover - Windows
+            process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(ProcessLookupError):
+            if hasattr(os, "killpg"):
+                os.killpg(process.pid, signal.SIGKILL)
+            else:  # pragma: no cover
+                process.kill()
+        process.wait(timeout=10)
+
+
+@contextlib.contextmanager
+def running_mock(log_dir: Path, update_interval: float = 0.2):
+    """Start modbus-mock-server (in its own uv project) on a free port; stop it afterwards."""
+    uv = shutil.which("uv")
+    if uv is None:
+        pytest.skip("uv is needed to run the mock device (modbus-mock-server is its own uv project)")
+    port = free_port()
+    env = {
+        **os.environ,
+        "MODBUS_HOST": "127.0.0.1",
+        "MODBUS_PORT": str(port),
+        "UPDATE_INTERVAL": str(update_interval),
+    }
+    env.pop("VIRTUAL_ENV", None)  # the mock has its own environment, not this one
+    log_path = log_dir / f"mock-{port}.log"
+    with open(log_path, "wb") as log_file:
+        process = subprocess.Popen(
+            [uv, "run", "--locked", "--quiet", "--directory", str(MOCK_DIR), "modbus-mock-server"],
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    device = MockDevice("127.0.0.1", port, process, log_path)
+    try:
+        deadline = time.monotonic() + 180  # the first run may have to create the mock's venv
+        while True:
+            if process.poll() is not None:
+                pytest.fail(f"mock device exited with {process.returncode}:\n{device.log()}")
+            try:
+                socket.create_connection((device.host, port), timeout=0.5).close()
+                break
+            except OSError:
+                if time.monotonic() > deadline:
+                    pytest.fail(f"mock device did not start listening:\n{device.log()}")
+                time.sleep(0.2)
+        yield device
+    finally:
+        _stop(process)
