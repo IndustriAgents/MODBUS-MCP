@@ -1027,9 +1027,11 @@ async def write_tag(
 ) -> dict[str, Any]:
     """Write a named holding-register or coil tag from the tag map.
 
-    Holding-register values are encoded with the tag's dtype (default uint16) and
-    byte/word order. Input and discrete-input tags are read-only. Only works when
-    MODBUS_WRITES_ENABLED=true; otherwise nothing is sent and success is false.
+    Holding-register values are in the same units read_tag returns: the tag's
+    scale and offset are reversed, then the value is encoded with its dtype
+    (default uint16) and byte/word order. Input and discrete-input tags are
+    read-only. Only works when MODBUS_WRITES_ENABLED=true; otherwise nothing is
+    sent and success is false.
     """
     app = _app(ctx)
     meta: dict[str, Any] = {"tag": name}
@@ -1057,10 +1059,38 @@ async def write_tag(
             meta=meta,
         )
     try:
-        regs = codec.encode(vals, tag.dtype or "uint16", tag.byteorder, tag.wordorder)
+        raw = _unscale(vals, tag)
+        regs = codec.encode(raw, tag.dtype or "uint16", tag.byteorder, tag.wordorder)
     except codec.CodecError as e:
         return _make_result(False, error=f"Tag {name!r}: {e}", meta=meta)
-    return await write_registers(tag.address, regs, ctx, tag.slave_id)
+    result = await write_registers(tag.address, regs, ctx, tag.slave_id)
+    result["meta"].update(tag=name, raw_values=raw)
+    return result
+
+
+def _unscale(values: list[Any], tag: Tag) -> list[Any]:
+    """Turn engineering values back into raw values: (value - offset) / scale.
+
+    read_tag returns raw * scale + offset, so write_tag accepts the same units. For
+    an integer dtype the result must be a whole number; 25.35 on a tag with scale
+    0.1 is refused rather than rounded to a different value.
+    """
+    if tag.scale == 1 and tag.offset == 0:
+        return values
+    raw: list[Any] = []
+    for value in values:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise codec.CodecError(f"value must be a number, got {value!r}")
+        r = (value - tag.offset) / tag.scale
+        if tag.dtype not in ("float32", "float64"):
+            if not math.isfinite(r) or abs(r - round(r)) > 1e-9 * max(1.0, abs(r)):
+                raise codec.CodecError(
+                    f"{value!r} is not a whole number of steps of scale {tag.scale}"
+                    f" (offset {tag.offset}); the raw value would be {r!r}"
+                )
+            r = round(r)
+        raw.append(r)
+    return raw
 
 
 # -----------------------------

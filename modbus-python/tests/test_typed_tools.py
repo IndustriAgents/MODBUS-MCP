@@ -63,3 +63,30 @@ def test_write_tag_rejects_out_of_range_values_before_sending(client) -> None:
     assert result["success"] is False
     assert "out of uint16 range" in result["error"]
     assert client.writes == []
+
+
+SCALED = {
+    "Temp": {"table": "holding", "address": 20, "dtype": "int16", "scale": 0.1, "offset": -40},
+    "Flow": {"table": "holding", "address": 30, "dtype": "float32", "scale": 2.0},
+}
+
+
+def test_write_tag_reverses_scale_and_offset(client) -> None:
+    ctx = make_ctx(client, SCALED, writes_enabled=True)
+    result = run(cli.write_tag("Temp", 25.3, ctx))
+    assert result["success"], result
+    assert client.hr[20] == 653  # (25.3 + 40) / 0.1
+    assert result["meta"]["raw_values"] == [653]
+    assert run(cli.read_tag("Temp", ctx))["data"]["values"] == [pytest.approx(25.3)]
+
+    assert run(cli.write_tag("Flow", 3.0, ctx))["success"]
+    assert codec.decode(client.hr[30:32], "float32") == [1.5]
+    assert run(cli.read_tag("Flow", ctx))["data"]["values"] == [3.0]
+
+
+def test_write_tag_refuses_values_between_scale_steps(client) -> None:
+    ctx = make_ctx(client, SCALED, writes_enabled=True)
+    result = run(cli.write_tag("Temp", 25.35, ctx))
+    assert result["success"] is False
+    assert "whole number of steps" in result["error"]
+    assert client.calls == []
