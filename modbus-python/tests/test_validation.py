@@ -29,13 +29,25 @@ def call(name: str, arguments: dict) -> dict:
     ("tool", "arguments", "fragment"),
     [
         ("read_register", {"address": -1}, "address: Input should be greater than or equal to 0"),
-        ("read_register", {"address": 65536}, "address: Input should be less than or equal to 65535"),
+        (
+            "read_register",
+            {"address": 65536},
+            "address: Input should be less than or equal to 65535",
+        ),
         ("read_register", {"address": "abc"}, "address: Input should be a valid integer"),
         ("read_register", {"address": True}, "not a boolean"),
         ("read_register", {}, "address: Field required"),
         ("read_register", {"address": 0, "slave_id": 256}, "slave_id"),
-        ("read_coils", {"address": 0, "count": 0}, "count: Input should be greater than or equal to 1"),
-        ("write_register", {"address": 0, "value": 70000}, "value: Input should be less than or equal to 65535"),
+        (
+            "read_coils",
+            {"address": 0, "count": 0},
+            "count: Input should be greater than or equal to 1",
+        ),
+        (
+            "write_register",
+            {"address": 0, "value": 70000},
+            "value: Input should be less than or equal to 65535",
+        ),
         ("write_register", {"address": 0, "value": -1}, "value"),
         ("write_coil", {"address": 0, "value": "maybe"}, "value: Input should be a valid boolean"),
         ("write_registers", {"address": 0, "values": []}, "values"),

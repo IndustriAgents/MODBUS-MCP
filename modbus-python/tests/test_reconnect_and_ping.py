@@ -109,4 +109,7 @@ def test_ping_reports_an_unreachable_device_as_failure(client, ctx) -> None:
 def test_ping_can_probe_another_address(client, ctx) -> None:
     result = run(cli.ping(ctx, address=7, slave_id=3))
     assert result["success"]
-    assert client.calls[-1] == ("read_holding_registers", {"address": 7, "count": 1, "device_id": 3})
+    assert client.calls[-1] == (
+        "read_holding_registers",
+        {"address": 7, "count": 1, "device_id": 3},
+    )

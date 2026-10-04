@@ -331,7 +331,7 @@ async def _chunked_read(
 
 # pymodbus renamed the unit-id keyword from `slave` (up to 3.9) to `device_id`
 # (3.10 and later); everything else this server calls is the same in both.
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def _unit_kwarg_for(client_type: type) -> str:
     try:
         params = inspect.signature(client_type.read_holding_registers).parameters
@@ -346,7 +346,7 @@ def _unit(client: Any, slave_id: int) -> dict[str, int]:
 
 
 def _json_number(value: Any) -> Any:
-    """JSON has no NaN or infinity; spell a non-finite float out instead of emitting invalid JSON."""
+    """JSON has no NaN or infinity: spell a non-finite float out rather than emit invalid JSON."""
     if isinstance(value, float) and not math.isfinite(value):
         return "NaN" if math.isnan(value) else ("Infinity" if value > 0 else "-Infinity")
     return value
@@ -1174,5 +1174,7 @@ async def ping(
         "tool_timeout": settings.tool_timeout,
         "tag_count": len(app.tags),
     }
-    error = None if device_reachable else f"Device at {settings.target} did not answer: {probe_error}"
+    error = (
+        None if device_reachable else f"Device at {settings.target} did not answer: {probe_error}"
+    )
     return _make_result(device_reachable, data=status, error=error)

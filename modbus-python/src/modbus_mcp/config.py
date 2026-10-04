@@ -106,7 +106,7 @@ class Settings:
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> Settings:
-        """Build settings from ``environ`` (default: ``os.environ``); raise ConfigError if invalid."""
+        """Build settings from ``environ`` (default ``os.environ``); ConfigError if invalid."""
         env = os.environ if environ is None else environ
         tool_timeout = _float(env, "MODBUS_TOOL_TIMEOUT", None, 0.0)
         return cls(

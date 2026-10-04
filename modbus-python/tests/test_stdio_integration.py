@@ -157,7 +157,9 @@ async def test_writes_and_typed_values_when_enabled(mock, tmp_path) -> None:
             }
         )
     )
-    async with server(mock, tmp_path, MODBUS_WRITES_ENABLED="true", REGISTER_MAP_FILE=str(tags)) as srv:
+    async with server(
+        mock, tmp_path, MODBUS_WRITES_ENABLED="true", REGISTER_MAP_FILE=str(tags)
+    ) as srv:
         assert (await srv.call("write_register", address=20, value=1234))["success"]
         assert (await srv.call("read_register", address=20))["data"] == {"value": 1234}
         assert (await srv.call("write_registers", address=21, values=[1, 2, 3]))["success"]
@@ -166,9 +168,13 @@ async def test_writes_and_typed_values_when_enabled(mock, tmp_path) -> None:
         assert (await srv.call("mask_write_register", address=20, and_mask=0xFF00, or_mask=0x0F))[
             "success"
         ]
-        assert (await srv.call("read_register", address=20))["data"] == {"value": (1234 & 0xFF00) | 0x0F}
+        assert (await srv.call("read_register", address=20))["data"] == {
+            "value": (1234 & 0xFF00) | 0x0F
+        }
         assert (await srv.call("write_coil", address=10, value=True))["success"]
-        assert (await srv.call("write_coils_bulk", address=11, values=[True, False, True]))["success"]
+        assert (await srv.call("write_coils_bulk", address=11, values=[True, False, True]))[
+            "success"
+        ]
         coils = await srv.call("read_coils", address=10, count=4)
         assert coils["data"]["values"] == [True, True, False, True]
 
@@ -187,11 +193,18 @@ async def test_writes_and_typed_values_when_enabled(mock, tmp_path) -> None:
         assert swapped["data"]["values"] == [-123456]
         assert (await srv.call("write_tag", name="Scaled", value=-12.3))["success"]
         assert (await srv.call("read_register", address=34))["data"] == {"value": 65536 - 123}
-        assert (await srv.call("read_tag", name="Scaled"))["data"]["values"] == [pytest.approx(-12.3)]
+        assert (await srv.call("read_tag", name="Scaled"))["data"]["values"] == [
+            pytest.approx(-12.3)
+        ]
         assert (await srv.call("write_tag", name="Lamp", value=False))["success"]
         assert (await srv.call("read_tag", name="Lamp"))["data"]["values"] == [False]
         listed = await srv.call("list_tags")
-        assert [t["name"] for t in listed["data"]["tags"]] == ["Counter", "Lamp", "Scaled", "Setpoint"]
+        assert [t["name"] for t in listed["data"]["tags"]] == [
+            "Counter",
+            "Lamp",
+            "Scaled",
+            "Setpoint",
+        ]
 
         refused = await srv.call("write_register", address=100, value=1)
         assert refused["success"] is False and "Illegal Data Address" in refused["error"]
@@ -231,7 +244,12 @@ def test_stdout_carries_only_json_rpc(mock, tmp_path) -> None:
         },
         {"jsonrpc": "2.0", "method": "notifications/initialized"},
         {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
-        {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "ping", "arguments": {}}},
+        {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": "ping", "arguments": {}},
+        },
         {
             "jsonrpc": "2.0",
             "id": 4,

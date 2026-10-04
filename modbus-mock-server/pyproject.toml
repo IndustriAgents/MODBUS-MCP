@@ -21,6 +21,11 @@ dependencies = [
 [project.scripts]
 modbus-mock-server = "modbus_local_server:main"
 
+[dependency-groups]
+dev = [
+  "ruff>=0.16",
+]
+
 [tool.hatch.build.targets.wheel]
 include = [
   "modbus_local_server.py",
@@ -33,3 +38,11 @@ include = [
   "README.md",
 ]
 
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+# T20: log to stderr instead of print().
+select = ["E", "F", "W", "I", "B", "UP", "T20"]

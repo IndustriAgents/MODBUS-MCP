@@ -134,7 +134,11 @@ def test_load_config_reads_settings_after_load_dotenv(monkeypatch: pytest.Monkey
 def test_importing_the_server_does_not_read_the_environment() -> None:
     env = clean_env(MODBUS_PORT="not-a-port", MODBUS_TYPE="bogus", REGISTER_MAP_FILE="/nope.json")
     proc = subprocess.run(
-        [sys.executable, "-c", "import modbus_mcp.cli as c; print(len(c.mcp._tool_manager.list_tools()))"],
+        [
+            sys.executable,
+            "-c",
+            "import modbus_mcp.cli as c; print(len(c.mcp._tool_manager.list_tools()))",
+        ],
         env=env,
         capture_output=True,
         text=True,

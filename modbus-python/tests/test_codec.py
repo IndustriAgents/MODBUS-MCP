@@ -106,7 +106,9 @@ def test_decode_errors() -> None:
 
 def test_matches_pymodbus_binary_payload() -> None:
     """Same layout as pymodbus' BinaryPayloadBuilder/Decoder, which exist up to pymodbus 3.9."""
-    payload = pytest.importorskip("pymodbus.payload", reason="pymodbus >= 3.10 has no payload module")
+    payload = pytest.importorskip(
+        "pymodbus.payload", reason="pymodbus >= 3.10 has no payload module"
+    )
     from pymodbus.constants import Endian
 
     endian = {"big": Endian.BIG, "little": Endian.LITTLE}

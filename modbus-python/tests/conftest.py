@@ -32,7 +32,7 @@ class FakeResponse:
         return bool(self.exception_code)
 
     def __str__(self) -> str:
-        return f"FakeResponse(function_code={self.function_code}, exception_code={self.exception_code})"
+        return f"FakeResponse(fc={self.function_code}, exception_code={self.exception_code})"
 
 
 class FakeClient:
@@ -91,7 +91,9 @@ class FakeClient:
 
     # --- reads ------------------------------------------------------------
     async def read_holding_registers(self, address, *, count=1, device_id=1):
-        err = self._enter("read_holding_registers", address=address, count=count, device_id=device_id)
+        err = self._enter(
+            "read_holding_registers", address=address, count=count, device_id=device_id
+        )
         return err or FakeResponse(registers=self.hr[address : address + count])
 
     async def read_input_registers(self, address, *, count=1, device_id=1):
@@ -124,7 +126,11 @@ class FakeClient:
 
     async def write_registers(self, address, values, *, device_id=1):
         err = self._enter(
-            "write_registers", address=address, count=len(values), values=values, device_id=device_id
+            "write_registers",
+            address=address,
+            count=len(values),
+            values=values,
+            device_id=device_id,
         )
         if not err:
             self.hr[address : address + len(values)] = list(values)
@@ -258,7 +264,9 @@ def running_mock(log_dir: Path, update_interval: float = 0.2, port: int | None =
     """Start modbus-mock-server (in its own uv project) on `port` or a free port; stop it after."""
     uv = shutil.which("uv")
     if uv is None:
-        pytest.skip("uv is needed to run the mock device (modbus-mock-server is its own uv project)")
+        pytest.skip(
+            "uv is needed to run the mock device (modbus-mock-server is its own uv project)"
+        )
     port = port or free_port()
     env = {
         **os.environ,
