@@ -85,7 +85,7 @@ The configuration is checked when it is read. An invalid value (a port that is n
 | `MODBUS_MAX_RETRIES`       | Retries after a failed read or a failed connection attempt (0-10); a write is never sent twice | `2` | — |
 | `MODBUS_RETRY_BACKOFF_BASE`| Backoff base in seconds (doubled per retry)     | `0.2`                | —        |
 | `MODBUS_TOOL_TIMEOUT`      | Per-request timeout (seconds; unset or `0` = none) | unset             | —        |
-| `MODBUS_CALL_TIMEOUT`      | Overall deadline for one tool call, in seconds; on expiry a read fails cleanly and a write that went out is `unknown` | `30` | — |
+| `MODBUS_CALL_TIMEOUT`      | Overall deadline for one tool call, in seconds, from the moment the call starts: it covers waiting behind other calls, reconnecting and every request of the call (one deadline, never restarted per request). On expiry a read fails cleanly, a write that went out is `unknown`, a write still waiting is `not_sent` and never sent | `30` | — |
 | `MODBUS_WRITES_ENABLED`    | Allow the write tools (`true`/`false`, also `1`/`0`, `yes`/`no`, `on`/`off`). Only from the process environment or `--env-file`; ignored in the automatically loaded `.env` | `false` | — |
 | `REGISTER_MAP_FILE`        | Path to JSON tag map file                       | unset                | —        |
 

@@ -88,6 +88,10 @@ a failure before sending is `not_sent`.
 A write that has not gone out is never sent after its call was abandoned: when
 the client cancels it, when the client disconnects (the server stops every
 pending call as soon as stdin closes), or when the call's deadline passes. The
+deadline (`MODBUS_CALL_TIMEOUT`, 30 s by default) starts when the call starts
+and includes time spent queued behind other calls: an MCP client whose own
+timeout fires sends no cancellation, so a write queued behind slow calls is
+dropped by this deadline rather than sent late. The
 last check runs right before the request is handed to the transport, with no
 await in between, so a write that was queued, reconnecting or waiting cannot
 be sent late.

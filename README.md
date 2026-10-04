@@ -253,7 +253,7 @@ An invalid value stops the server with a `configuration error` message on stderr
 - MODBUS_MAX_RETRIES: retries after a failed read or a failed connection attempt, 0-10 (default: 2); a write is never sent twice
 - MODBUS_RETRY_BACKOFF_BASE: backoff seconds, doubled per retry (default: 0.2)
 - MODBUS_TOOL_TIMEOUT: per‑request timeout in seconds (default: unset or 0 = none; TCP/UDP requests still end after pymodbus' 3 s)
-- MODBUS_CALL_TIMEOUT: overall deadline for one tool call in seconds (default: 30); a read then fails cleanly, a write that went out is `unknown`
+- MODBUS_CALL_TIMEOUT: overall deadline for one tool call in seconds (default: 30). It starts when the call starts and covers everything the call does: waiting behind other calls, reconnecting, and every request it makes. When it passes, a read fails cleanly, a write that went out is `unknown`, and a write still waiting is `not_sent` and never sent
 - MODBUS_WRITES_ENABLED: true/false to allow writes (default: **false**; only from the process environment or `--env-file`)
 - REGISTER_MAP_FILE: path to tag‑map JSON (optional)
 
