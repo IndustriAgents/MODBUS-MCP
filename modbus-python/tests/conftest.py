@@ -282,6 +282,12 @@ class MockDevice:
 
 
 def stop_process(process: subprocess.Popen) -> None:
+    """Stop a mock started by start_mock(): close its stdin, then signal its group."""
+    if process.stdin is not None and not process.stdin.closed:
+        with contextlib.suppress(OSError):
+            process.stdin.close()  # --exit-on-stdin-eof: the mock stops by itself
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=5)
     if process.poll() is not None:
         return
     # `uv run` starts the mock as a child; signal the whole process group.
@@ -301,15 +307,18 @@ def stop_process(process: subprocess.Popen) -> None:
         process.wait(timeout=10)
 
 
-@contextlib.contextmanager
-def running_mock(log_dir: Path, update_interval: float = 0.2, port: int | None = None):
-    """Start modbus-mock-server (in its own uv project) on `port` or a free port; stop it after."""
+def start_mock(log_path: Path, port: int, update_interval: float = 0.2) -> subprocess.Popen:
+    """Start modbus-mock-server (in its own uv project) on 127.0.0.1:`port`.
+
+    Its stdin is a pipe this process holds, and the mock runs with
+    --exit-on-stdin-eof: if this process dies, even by SIGKILL, the pipe closes
+    and the mock exits instead of being orphaned.
+    """
     uv = shutil.which("uv")
     if uv is None:
         pytest.skip(
             "uv is needed to run the mock device (modbus-mock-server is its own uv project)"
         )
-    port = port or free_port()
     env = {
         **os.environ,
         "MODBUS_HOST": "127.0.0.1",
@@ -317,29 +326,44 @@ def running_mock(log_dir: Path, update_interval: float = 0.2, port: int | None =
         "UPDATE_INTERVAL": str(update_interval),
     }
     env.pop("VIRTUAL_ENV", None)  # the mock has its own environment, not this one
-    log_path = log_dir / f"mock-{port}.log"
+    command = [uv, "run", "--locked", "--quiet", "--directory", str(MOCK_DIR)]
+    command += ["modbus-mock-server", "--exit-on-stdin-eof"]
     with open(log_path, "wb") as log_file:
-        process = subprocess.Popen(
-            [uv, "run", "--locked", "--quiet", "--directory", str(MOCK_DIR), "modbus-mock-server"],
+        return subprocess.Popen(
+            command,
             env=env,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE,
             stdout=log_file,
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
+
+
+def wait_until_listening(host: str, port: int, process: subprocess.Popen, log_path: Path) -> None:
+    deadline = time.monotonic() + 180  # the first run may have to create the mock's venv
+    while True:
+        if process.poll() is not None:
+            log = log_path.read_text(errors="replace")
+            pytest.fail(f"mock device exited with {process.returncode}:\n{log}")
+        try:
+            socket.create_connection((host, port), timeout=0.5).close()
+            return
+        except OSError:
+            if time.monotonic() > deadline:
+                log = log_path.read_text(errors="replace")
+                pytest.fail(f"mock device did not start listening:\n{log}")
+            time.sleep(0.2)
+
+
+@contextlib.contextmanager
+def running_mock(log_dir: Path, update_interval: float = 0.2, port: int | None = None):
+    """Start the mock on `port` or a free port; stop it afterwards."""
+    port = port or free_port()
+    log_path = log_dir / f"mock-{port}.log"
+    process = start_mock(log_path, port, update_interval)
     device = MockDevice("127.0.0.1", port, process, log_path)
     try:
-        deadline = time.monotonic() + 180  # the first run may have to create the mock's venv
-        while True:
-            if process.poll() is not None:
-                pytest.fail(f"mock device exited with {process.returncode}:\n{device.log()}")
-            try:
-                socket.create_connection((device.host, port), timeout=0.5).close()
-                break
-            except OSError:
-                if time.monotonic() > deadline:
-                    pytest.fail(f"mock device did not start listening:\n{device.log()}")
-                time.sleep(0.2)
+        wait_until_listening(device.host, port, process, log_path)
         yield device
     finally:
         stop_process(process)

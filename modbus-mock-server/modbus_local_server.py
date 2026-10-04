@@ -4,12 +4,14 @@ The register map is documented in README.md; the initial values below are at
 the addresses it lists. Runs on pymodbus 3.10-3.12 (see pyproject.toml).
 """
 
+import argparse
 import asyncio
 import contextlib
 import logging
 import os
 import random
 import sys
+import threading
 
 from pymodbus.datastore import (
     ModbusDeviceContext,
@@ -233,11 +235,28 @@ async def simulation_loop(
         await asyncio.sleep(interval)
 
 
+def _stop_at_stdin_eof(loop: asyncio.AbstractEventLoop, task: asyncio.Task) -> None:
+    """Block until stdin reaches end of file, then cancel `task` (the server)."""
+    with contextlib.suppress(Exception):
+        while sys.stdin.buffer.read(4096):
+            pass
+    loop.call_soon_threadsafe(task.cancel)
+
+
 async def run_server(
     host: str = DEFAULT_HOST,
     port: int = DEFAULT_PORT,
     interval: float = DEFAULT_UPDATE_INTERVAL,
+    exit_on_stdin_eof: bool = False,
 ) -> None:
+    if exit_on_stdin_eof:
+        # Whoever started us holds the other end of stdin; when it exits, even
+        # by SIGKILL, the pipe closes and the mock stops instead of lingering.
+        threading.Thread(
+            target=_stop_at_stdin_eof,
+            args=(asyncio.get_running_loop(), asyncio.current_task()),
+            daemon=True,
+        ).start()
     context = build_context()
 
     identity = ModbusDeviceIdentification()
@@ -271,17 +290,31 @@ def _settings_from_env() -> tuple[str, int, float]:
     return host, port, interval
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     """Entry point of `modbus-mock-server`. Settings come from the environment."""
+    parser = argparse.ArgumentParser(
+        prog="modbus-mock-server",
+        description="Simulated Modbus TCP device. Settings: MODBUS_HOST, MODBUS_PORT, "
+        "UPDATE_INTERVAL.",
+    )
+    parser.add_argument(
+        "--exit-on-stdin-eof",
+        action="store_true",
+        help="stop when stdin is closed (for test harnesses: the mock then cannot outlive "
+        "the process that started it)",
+    )
+    args = parser.parse_args(argv)
     logging.basicConfig(
         level=logging.INFO, stream=sys.stderr, format="%(asctime)s %(levelname)s %(message)s"
     )
     host, port, interval = _settings_from_env()
     log.info("Starting Modbus Mock Server on %s:%s ...", host, port)
     try:
-        asyncio.run(run_server(host, port, interval))
+        asyncio.run(run_server(host, port, interval, args.exit_on_stdin_eof))
     except KeyboardInterrupt:
         log.info("Server stopped by user.")
+    except asyncio.CancelledError:
+        log.info("stdin closed; server stopped.")
 
 
 if __name__ == "__main__":
