@@ -249,93 +249,6 @@ async def test_server_reconnects_after_the_device_restarts(tmp_path) -> None:
                 assert any("reconnected" in str(data) for _, data in srv.logs)
 
 
-def test_stdout_carries_only_json_rpc(mock, tmp_path) -> None:
-    """Drive the server by hand and check every byte on stdout is a JSON-RPC message."""
-    requests = [
-        {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "pytest", "version": "0"},
-            },
-        },
-        {"jsonrpc": "2.0", "method": "notifications/initialized"},
-        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
-        {
-            "jsonrpc": "2.0",
-            "id": 3,
-            "method": "tools/call",
-            "params": {"name": "ping", "arguments": {}},
-        },
-        {
-            "jsonrpc": "2.0",
-            "id": 4,
-            "method": "tools/call",
-            "params": {"name": "read_register", "arguments": {"address": 0}},
-        },
-        {
-            "jsonrpc": "2.0",
-            "id": 5,
-            "method": "tools/call",
-            "params": {"name": "write_register", "arguments": {"address": 1, "value": 9}},
-        },
-        {
-            "jsonrpc": "2.0",
-            "id": 6,
-            "method": "tools/call",
-            "params": {"name": "read_register", "arguments": {"address": "x"}},
-        },
-    ]
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "modbus_mcp"],
-        env=server_env(mock),
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    try:
-        responses = {}
-        for request in requests:
-            proc.stdin.write(json.dumps(request) + "\n")
-            proc.stdin.flush()
-            if "id" not in request:
-                continue
-            while True:  # read until this request's response; log notifications may come first
-                line = proc.stdout.readline()
-                assert line, proc.stderr.read()
-                message = json.loads(line)
-                assert message["jsonrpc"] == "2.0"
-                if message.get("id") == request["id"]:
-                    responses[request["id"]] = message
-                    break
-                assert message.get("method", "").startswith("notifications/"), message
-        # MCP shutdown: close stdin, wait, then SIGTERM (mcp 1.6's stdio server does
-        # not exit on EOF by itself; 1.10+ does).
-        proc.stdin.close()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.terminate()
-            proc.wait(timeout=10)
-        rest = proc.stdout.read()
-    finally:
-        if proc.poll() is None:
-            proc.kill()
-            proc.wait()
-    for line in rest.splitlines():
-        assert json.loads(line)["jsonrpc"] == "2.0"
-    assert responses[1]["result"]["serverInfo"]["version"] == version("modbus-mcp")
-    assert len(responses[2]["result"]["tools"]) == 17
-    envelopes = {i: json.loads(responses[i]["result"]["content"][0]["text"]) for i in (3, 4, 5, 6)}
-    assert envelopes[3]["success"] and envelopes[4]["data"] == {"value": 50}
-    assert envelopes[5]["error"] == WRITES_DISABLED
-    assert envelopes[6]["success"] is False and "Invalid arguments" in envelopes[6]["error"]
-
-
 async def test_starts_without_a_device_and_connects_when_it_appears(tmp_path) -> None:
     port = free_port()  # nothing listens here yet
     target = SimpleNamespace(host="127.0.0.1", port=port)
@@ -360,30 +273,44 @@ async def test_starts_without_a_device_and_connects_when_it_appears(tmp_path) ->
     assert "Cannot reach Modbus tcp device" in srv.stderr.read_text()
 
 
-def test_stdout_is_clean_without_a_device(tmp_path) -> None:
-    port = free_port()  # nothing listens here
-    env = {k: v for k, v in os.environ.items() if not k.startswith(SERVER_VARS)}
-    env.update(MODBUS_HOST="127.0.0.1", MODBUS_PORT=str(port), MODBUS_RETRY_BACKOFF_BASE="0")
-    messages = [
-        {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "pytest", "version": "0"},
-            },
-        },
-        {"jsonrpc": "2.0", "method": "notifications/initialized"},
-        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
-        {
-            "jsonrpc": "2.0",
-            "id": 3,
-            "method": "tools/call",
-            "params": {"name": "read_register", "arguments": {"address": 0}},
-        },
-    ]
+# --- stdout carries JSON-RPC and nothing else -------------------------------------------
+
+# One call per tool, with arguments that work against the mock (writes go to
+# unused addresses 60-63). The tests check this covers every tool in tools/list.
+EVERY_TOOL = {
+    "read_register": {"address": 0},
+    "write_register": {"address": 60, "value": 9},
+    "read_coils": {"address": 0, "count": 2},
+    "write_coil": {"address": 60, "value": True},
+    "read_input_registers": {"address": 0, "count": 4},
+    "read_multiple_holding_registers": {"address": 0, "count": 3},
+    "read_discrete_inputs": {"address": 0, "count": 2},
+    "write_registers": {"address": 61, "values": [1, 2]},
+    "write_coils_bulk": {"address": 61, "values": [True, False]},
+    "mask_write_register": {"address": 62, "and_mask": 65532, "or_mask": 3},
+    "read_device_information": {},
+    "read_holding_typed": {"address": 63, "dtype": "float32"},
+    "read_input_typed": {"address": 0, "dtype": "uint16", "scale": 0.1},
+    "list_tags": {},
+    "read_tag": {"name": "Temperature"},
+    "write_tag": {"name": "Setpoint", "value": 1.5},
+    "ping": {},
+}
+RAW_TAGS = {
+    "Temperature": {"table": "input", "address": 0, "dtype": "uint16", "scale": 0.1},
+    "Setpoint": {"table": "holding", "address": 70, "dtype": "float32"},
+}
+
+
+def raw_session(env: dict[str, str]) -> tuple[dict[int, dict], list[str]]:
+    """Speak JSON-RPC to `python -m modbus_mcp` by hand: initialize, list the tools and
+    prompts, call every tool once (plus one invalid call), get the prompt.
+
+    The server runs with PYTHONUNBUFFERED=1: with a block-buffered stdout, a stray
+    print() would sit in the buffer and be lost when the process is stopped, and the
+    test could not see it. Returns the responses by id and every stdout line.
+    """
+    env = {**env, "PYTHONUNBUFFERED": "1"}
     proc = subprocess.Popen(
         [sys.executable, "-m", "modbus_mcp"],
         env=env,
@@ -392,33 +319,100 @@ def test_stdout_is_clean_without_a_device(tmp_path) -> None:
         stderr=subprocess.PIPE,
         text=True,
     )
+    lines: list[str] = []
+    responses: dict[int, dict] = {}
+    next_id = iter(range(1, 1000))
+
+    def request(method: str, params: dict | None = None) -> dict:
+        message: dict = {"jsonrpc": "2.0", "id": next(next_id), "method": method}
+        if params is not None:
+            message["params"] = params
+        proc.stdin.write(json.dumps(message) + "\n")
+        proc.stdin.flush()
+        while message["id"] not in responses:  # log notifications may come first
+            line = proc.stdout.readline()
+            assert line, proc.stderr.read()
+            lines.append(line)
+            reply = json.loads(line)  # a stray print() fails here
+            assert reply["jsonrpc"] == "2.0", reply
+            if "id" in reply:
+                responses[reply["id"]] = reply
+        return responses[message["id"]]
+
     try:
-        responses = {}
-        for message in messages:
-            proc.stdin.write(json.dumps(message) + "\n")
-            proc.stdin.flush()
-            while "id" in message and message["id"] not in responses:
-                line = proc.stdout.readline()
-                assert line, proc.stderr.read()
-                reply = json.loads(line)
-                assert reply["jsonrpc"] == "2.0"
-                if "id" in reply:
-                    responses[reply["id"]] = reply
+        init = request(
+            "initialize",
+            {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "pytest", "version": "0"},
+            },
+        )
+        assert init["result"]["serverInfo"]["name"] == "Modbus MCP Server"
+        proc.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}))
+        proc.stdin.write("\n")
+        proc.stdin.flush()
+        listed = {t["name"] for t in request("tools/list")["result"]["tools"]}
+        assert listed == set(EVERY_TOOL), "EVERY_TOOL must call every tool"
+        for name, arguments in EVERY_TOOL.items():
+            request("tools/call", {"name": name, "arguments": arguments})
+        request("tools/call", {"name": "read_register", "arguments": {"address": "x"}})
+        assert [p["name"] for p in request("prompts/list")["result"]["prompts"]] == [
+            "analyze_register"
+        ]
+        request("prompts/get", {"name": "analyze_register", "arguments": {"value": "42"}})
+        # MCP shutdown: close stdin, wait, then SIGTERM (mcp 1.6's stdio server does
+        # not exit on EOF by itself; 1.10+ does).
         proc.stdin.close()
         try:
             proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:  # mcp < 1.10 does not exit on EOF
+        except subprocess.TimeoutExpired:
             proc.terminate()
             proc.wait(timeout=10)
-        rest = proc.stdout.read()
+        lines.extend(proc.stdout.read().splitlines(keepends=True))
     finally:
         if proc.poll() is None:
             proc.kill()
             proc.wait()
-    for line in rest.splitlines():
-        assert json.loads(line)["jsonrpc"] == "2.0"
-    assert responses[1]["result"]["serverInfo"]["name"] == "Modbus MCP Server"
-    assert len(responses[2]["result"]["tools"]) == 17
-    envelope = json.loads(responses[3]["result"]["content"][0]["text"])
-    assert envelope["success"] is False
-    assert envelope["error"] == f"cannot reach device at 127.0.0.1:{port}"
+    for line in lines:
+        assert json.loads(line)["jsonrpc"] == "2.0", line
+    return responses, lines
+
+
+def envelopes(responses: dict[int, dict]) -> dict[str, dict]:
+    """The envelope of each tools/call, by tool name (ids 3.. follow EVERY_TOOL order)."""
+    names = list(EVERY_TOOL) + ["invalid read_register"]
+    return {
+        name: json.loads(responses[3 + i]["result"]["content"][0]["text"])
+        for i, name in enumerate(names)
+    }
+
+
+def test_stdout_carries_only_json_rpc(mock, tmp_path) -> None:
+    tags = tmp_path / "tags.json"
+    tags.write_text(json.dumps(RAW_TAGS))
+    env = server_env(mock, MODBUS_WRITES_ENABLED="true", REGISTER_MAP_FILE=str(tags))
+    responses, lines = raw_session(env)
+    assert len(lines) >= len(EVERY_TOOL) + 5
+    assert responses[1]["result"]["serverInfo"]["version"] == version("modbus-mcp")
+    results = envelopes(responses)
+    failed = {k: v["error"] for k, v in results.items() if not v["success"]}
+    assert set(failed) == {"invalid read_register"}, failed
+    assert results["read_register"]["data"] == {"value": 50}
+    assert "Invalid arguments" in failed["invalid read_register"]
+
+
+def test_stdout_is_clean_without_a_device(tmp_path) -> None:
+    port = free_port()  # nothing listens here
+    env = {k: v for k, v in os.environ.items() if not k.startswith(SERVER_VARS)}
+    env.update(MODBUS_HOST="127.0.0.1", MODBUS_PORT=str(port), MODBUS_RETRY_BACKOFF_BASE="0")
+    tags = tmp_path / "tags.json"
+    tags.write_text(json.dumps(RAW_TAGS))
+    env.update(MODBUS_WRITES_ENABLED="true", REGISTER_MAP_FILE=str(tags))
+    responses, _ = raw_session(env)
+    results = envelopes(responses)
+    unreachable = f"cannot reach device at 127.0.0.1:{port}"
+    assert results["list_tags"]["success"] is True  # needs no device
+    for name in set(EVERY_TOOL) - {"list_tags"}:
+        assert results[name]["success"] is False, name
+        assert results[name]["error"] == unreachable, (name, results[name])
