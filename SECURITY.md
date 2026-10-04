@@ -32,23 +32,46 @@ MODBUS_WRITES_ENABLED=true to allow them)" }` without sending anything to the
 device. Only a recognised true/false value is accepted; anything else stops the
 server at startup instead of being read as one or the other.
 
+### Where the switch may come from
+
+`MODBUS_WRITES_ENABLED` is honoured only from the server's real process
+environment (for an MCP client, the `env` block of its server configuration) or
+from a file passed explicitly with `modbus-mcp --env-file PATH`. A `.env` file
+the server finds by itself (searching up from its package directory) may set
+connection settings, but not this switch: when an MCP client launches the
+server straight from a virtualenv, that search can reach the client's own
+project, which may not be trusted. If such a `.env` sets
+`MODBUS_WRITES_ENABLED`, the server ignores it and prints a warning on stderr
+naming the variable and the file. See
+[`modbus-python/.env.example`](modbus-python/.env.example).
+
 What the server checks before a write, when writes are enabled:
 
 - Arguments must fit Modbus: addresses and register values 0-65535, unit ids
   0-255, at most 123 registers or 1968 coils per request. A value that does not
-  fit is refused, never truncated or wrapped.
+  fit is refused, never truncated or wrapped. Types are strict: `"5"` or `5.0`
+  is not an address and `1` or `"on"` is not a coil state.
 - `write_tag` only writes the registers or coils its tag defines (exactly
   `count` values), only to holding-register and coil tags, and only values the
   tag's dtype can hold exactly after reversing its scale and offset.
 
 What it does not check: there is no per-register allowlist and no
 engineering-range check. When writes are enabled, any address the device
-accepts can be written with any value that fits the register. A write whose
-reply is lost (timeout) is retried up to `MODBUS_MAX_RETRIES` times (default 2),
-so it can reach the device more than once. A repeat writes the same value or
-mask again: harmless for a setpoint, not necessarily for a command register
-that acts on every write it receives. Set `MODBUS_MAX_RETRIES=0` if that
-matters for your equipment.
+accepts can be written with any value that fits the register.
+
+### A write is sent at most once
+
+pymodbus re-sends a request on a timeout unless told not to; this server
+creates its client with `retries=0`, and its own retries
+(`MODBUS_MAX_RETRIES`) apply to reads and to connection attempts only. A write
+is retried only when nothing was sent (the connection could not be opened).
+Once it has gone out, a lost or late reply is reported, not retried:
+`success: false`, `meta.outcome: "unknown"`, `meta.request_sent: true`,
+`"no reply; the write may have been applied; check before retrying"`. Read
+the value back before deciding to write again; for a command register that
+acts on every write, a second write is a second command. The other outcomes are
+`written`, `rejected` (the device answered with a Modbus exception) and
+`not_sent`.
 
 ## Running it safely
 

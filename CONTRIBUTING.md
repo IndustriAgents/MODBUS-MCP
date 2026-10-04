@@ -63,20 +63,23 @@ uv sync
 `modbus-mcp` is a stdio server. Run by hand, it prints nothing and waits for
 JSON-RPC on stdin, so let an MCP client launch it: the Inspector command under
 [Testing a change](#testing-a-change) does that. The server connects to the
-device at startup. If the device is unreachable, it exits with
-`RuntimeError: Failed to connect to Modbus tcp device at <host>:<port>`, so
-start the mock first.
+device at startup but starts either way; until the device answers, the device
+tools return `"cannot reach device at <host>:<port>"`, and every call tries to
+connect, so the mock can come up before or after the server.
 
 ### Lockfiles
 
 Both projects commit `uv.lock`, and `uv sync` installs exactly what it pins.
 The ranges in the two `pyproject.toml` files are the versions the tests pass
-on: the server takes `mcp>=1.6.0,<2` and `pymodbus>=3.9.2,<3.16`, the mock
-`pymodbus>=3.11,<3.13` (see their READMEs for why). CI runs the server's tests
-on the locked versions and again on the lowest supported ones, so if you widen
-a range, run the suite on the new end first (for example
-`uv pip install "pymodbus==X"` in the synced environment, then
-`uv run --no-sync pytest`, then `uv sync --locked` to go back). If you change
+on: the server takes `mcp>=1.6.0,<2`, `pymodbus[serial]>=3.9.2,<3.16` and
+`python-dotenv>=1.1.0`, the mock `pymodbus>=3.11.1,<3.13` (see their READMEs
+for why). CI runs the server's tests on the locked versions and again with
+`uv pip install --resolution lowest-direct`, i.e. the lowest version of every
+direct dependency, and starts the mock on its lowest pymodbus. If you change a
+lower bound, run the suite on it first (see "To check the lowest versions" in
+[modbus-python/README.md](modbus-python/README.md#testing)); to try another
+version, `uv pip install "pymodbus==X"` in the synced environment, then
+`uv run --no-sync pytest`, then `uv sync --locked` to go back. If you change
 dependencies, run `uv lock` in that project, commit the lockfile, and check
 that `uv sync --locked` still passes.
 
@@ -127,10 +130,23 @@ you used.
 
 - MCP speaks over **stdio**, so `stdout` belongs to the protocol. All logging
   goes to `stderr`. A stray `print()` in the server corrupts the session; ruff's
-  `T20` rules reject `print` in the server code, and a test checks that stdout
-  carries only JSON-RPC.
-- Read configuration in `main()` (after `.env` is loaded), never at import
-  time, and fail at startup, not at the first tool call, when it is unusable.
+  `T20` rules reject `print` in the server code, and
+  `tests/test_stdio_integration.py` runs the server unbuffered, calls every
+  tool and checks that stdout carries only JSON-RPC. A new tool must be added
+  to its `EVERY_TOOL` list (the test fails until it is).
+- Read configuration in `main()`, never at import time, and fail at startup,
+  not at the first tool call, when it is unusable. A setting that lets the
+  server change the device (`MODBUS_WRITES_ENABLED`, `GATE_VARIABLES` in
+  `cli.py`) comes only from the process environment or `--env-file`, never
+  from a `.env` found automatically.
+- A write reaches the device at most once. Only (re)connecting may be
+  retried; once a request may have gone out, a lost reply is reported
+  (`meta.outcome: "unknown"`, "may have been applied; check before retrying"),
+  never retried. Write tools report `meta.outcome` and `meta.request_sent`.
+- Tool arguments are strict: integers are JSON integers (`Field(strict=True)`),
+  booleans are `true`/`false`.
+- Device tools must work, or fail cleanly with `success: false`, when the
+  device is unreachable; the server must start without it.
 - An error is a returned `{ success: false, error }`, not an exception that
   kills the server. The model needs to be told what went wrong. Invalid
   arguments and unexpected exceptions are turned into that envelope too.
@@ -140,6 +156,8 @@ you used.
 - `Context.info()`/`Context.error()` are coroutines: `await` them.
 - Every tool needs a docstring and parameter descriptions; they are what the
   model sees in `tools/list`.
+- A safety test must be able to fail: check it by removing the protection it
+  covers and watching it fail.
 - Keep tool names and argument names aligned with the other IndustriConnect
   servers.
 

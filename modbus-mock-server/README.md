@@ -98,7 +98,7 @@ The modbus-python test suite runs the same kind of checks automatically: `uv run
 
 ## Known issues
 
-- **Only pymodbus 3.11 and 3.12 can run it.** It is built on `ModbusDeviceContext`/`ModbusServerContext`, which appeared in pymodbus 3.10. pymodbus 3.10.0 answers reads past the 100-entry tables with short replies instead of exception 2, and pymodbus 3.13 replaced this datastore API (the mock fails at startup). `pyproject.toml` therefore asks for `pymodbus>=3.11,<3.13`, and `uv.lock` pins 3.12.1. Moving to pymodbus' newer `SimDevice` API would lift the upper bound. pymodbus 3.10+ needs Python 3.10+, so the project requires Python 3.10+ too.
+- **Only pymodbus 3.11.1 to 3.12 can run it.** It is built on `ModbusDeviceContext`/`ModbusServerContext`, which appeared in pymodbus 3.10. pymodbus 3.10.0 and 3.11.0 answer reads past the 100-entry tables with short replies instead of exception 2, and pymodbus 3.13 replaced this datastore API (the mock fails at startup). `pyproject.toml` therefore asks for `pymodbus>=3.11.1,<3.13` (tested: 3.11.1-3.11.4, 3.12.0, 3.12.1; CI starts it on 3.11.1), and `uv.lock` pins 3.12.1. Moving to pymodbus' newer `SimDevice` API would lift the upper bound. pymodbus 3.10+ needs Python 3.10+, so the project requires Python 3.10+ too.
 
 Device identity served: VendorName `Mock ICS`, ProductCode `MODBUS-MOCK`, MajorMinorRevision `0.1`.
 
