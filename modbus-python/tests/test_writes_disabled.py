@@ -46,3 +46,14 @@ def test_writes_go_through_when_enabled(client, name: str) -> None:
 def test_ping_reports_writes_disabled(client, ctx) -> None:
     result = run(cli.ping(ctx))
     assert result["data"]["writes_enabled"] is False
+
+
+def test_write_tag_checks_the_switch_before_anything_else(client) -> None:
+    # write_tag must not depend on the gates of the tools it calls: with writes
+    # disabled, even an unknown tag or an unusable value gets the same refusal.
+    ctx = make_ctx(client, TAGS)
+    for name, value in [("NoSuchTag", 1), ("Valve", "not a number"), ("Pump", 1)]:
+        result = run(cli.write_tag(name, value, ctx))
+        assert result["error"] == cli.WRITES_DISABLED, (name, result)
+        assert result["meta"] == {"tag": name, "outcome": "not_sent", "request_sent": False}
+    assert client.calls == []
