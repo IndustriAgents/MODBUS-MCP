@@ -223,3 +223,56 @@ async def test_a_client_that_vanishes_entirely_is_a_clean_end() -> None:
     stderr = (await client.proc.stderr.read()).decode(errors="replace")
     assert client.proc.returncode == 0, stderr
     assert "Traceback" not in stderr, stderr
+
+
+# --- one deadline per tool call, from its start, over everything it waits for ----------
+
+
+async def test_a_write_queued_behind_slow_reads_is_never_sent_after_its_deadline() -> None:
+    """Slow reads hold pymodbus' lock; a write queues behind them. Its deadline (2 s,
+    MODBUS_CALL_TIMEOUT) runs while it waits: whatever happens, its frame must not reach
+    the device after that deadline. (The MCP SDK sends no notifications/cancelled when its
+    own client-side timeout fires, so this deadline is the only protection.)"""
+    loop = asyncio.get_running_loop()
+    async with DropWriteRepliesDevice(write_reply="echo", read_delay=1.5) as device:
+        client = await RawClient.start(device.port, MODBUS_CALL_TIMEOUT="2")
+        try:
+            reads = [await client.call("read_register", address=0) for _ in range(3)]
+            issued = loop.time()
+            write = await client.call("write_register", address=7, value=1)
+            result = envelope(await client.response(write, 15))
+            for read in reads:
+                await client.response(read, 15)
+            await asyncio.sleep(2)  # anything late would arrive by now
+        finally:
+            await client.close()
+    landed = [t for t, fc, address in device.arrivals if (fc, address) == (6, 7)]
+    assert all(t <= issued + 2.0 + 0.2 for t in landed), (issued, landed)
+    if landed:
+        assert result["meta"]["outcome"] == "written", result
+    else:
+        assert result["meta"]["outcome"] == "not_sent", result
+        assert result["meta"]["request_sent"] is False
+
+
+async def test_one_deadline_covers_every_request_of_a_call() -> None:
+    """A read split into three requests (125 registers each) shares ONE deadline: the
+    third request does not get a fresh 2 s, the call fails at 2 s, the device sees no
+    request after that, and the two completed chunks are reported."""
+    loop = asyncio.get_running_loop()
+    async with DropWriteRepliesDevice(read_delay=0.9) as device:
+        client = await RawClient.start(device.port, MODBUS_CALL_TIMEOUT="2")
+        try:
+            started = loop.time()
+            call = await client.call("read_multiple_holding_registers", address=0, count=375)
+            result = envelope(await client.response(call, 15))
+            await asyncio.sleep(2)
+        finally:
+            await client.close()
+    assert result["success"] is False
+    assert result["error"].startswith("no result within the 2 s deadline"), result
+    assert [c["address"] for c in result["meta"]["chunks"]] == [0, 125]  # these completed
+    assert len(result["meta"]["partial"]) == 250
+    reads = [t for t, fc, _ in device.arrivals if fc == 3]
+    assert len(reads) == 3, device.arrivals  # the third went out, nothing after it
+    assert all(t <= started + 2.0 + 0.2 for t in reads), (started, reads)

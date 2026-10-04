@@ -11,7 +11,7 @@ import json
 import time
 
 import pytest
-from conftest import make_ctx, run
+from conftest import FakeResponse, make_ctx, run
 
 from modbus_mcp import cli
 from modbus_mcp.config import ConfigError, Settings
@@ -98,3 +98,64 @@ def test_the_backstop_ends_a_call_that_ignores_the_deadline(client, monkeypatch)
         assert envelope["success"] is False
         assert envelope["error"].startswith("did not finish within the 0.2 s deadline")
         assert envelope["meta"].get("outcome") == outcome
+
+
+# --- the deadline covers waiting in a queue, and a late write is never sent -------------
+
+
+def test_a_write_that_expires_while_queued_is_never_sent(client) -> None:
+    """The deadline starts with the call and includes time spent queued. A write still
+    waiting when it passes is not_sent, and is not sent when the queue clears."""
+
+    async def scenario():
+        queue = asyncio.Lock()  # like pymodbus' lock, held by slow calls
+        await queue.acquire()
+
+        async def write_register(address, value, *, device_id=1):
+            async with queue:
+                client._enter("write_register", address=address, value=value)
+                return FakeResponse(function_code=6, address=address, registers=[value])
+
+        client.write_register = write_register
+        ctx = make_ctx(client, writes_enabled=True)
+        result = await cli.run_with_deadline(0.3, cli.write_register(1, 5, ctx))
+        queue.release()  # the slow calls finish
+        await asyncio.sleep(0.3)
+        return result
+
+    result = asyncio.run(scenario())
+    assert result["meta"]["outcome"] == "not_sent" and result["meta"]["request_sent"] is False
+    assert result["error"].startswith("the write was not sent")
+    assert client.sent == []
+
+
+def test_a_write_kept_alive_past_its_deadline_is_refused_at_the_send(client) -> None:
+    """Even if the queued request outlives its call (here: shielded from cancellation),
+    the last check right before the send refuses it once the deadline has passed."""
+
+    async def scenario():
+        queue = asyncio.Lock()
+        await queue.acquire()
+        leftovers = []
+
+        async def write_register(address, value, *, device_id=1):
+            async def queued():
+                async with queue:
+                    client._enter("write_register", address=address, value=value)
+                    return FakeResponse(function_code=6, address=address, registers=[value])
+
+            task = asyncio.ensure_future(queued())
+            leftovers.append(task)
+            return await asyncio.shield(task)
+
+        client.write_register = write_register
+        ctx = make_ctx(client, writes_enabled=True)
+        result = await cli.run_with_deadline(0.3, cli.write_register(1, 5, ctx))
+        queue.release()
+        done = await asyncio.gather(*leftovers, return_exceptions=True)
+        return result, done
+
+    result, done = asyncio.run(scenario())
+    assert result["meta"]["outcome"] == "not_sent"
+    assert isinstance(done[0], cli.RequestNotSent) and "deadline" in str(done[0])
+    assert client.sent == []

@@ -40,12 +40,19 @@ class DropWriteRepliesDevice:
     """
 
     def __init__(
-        self, write_reply: str | int = "drop", port: int = 0, hold: asyncio.Event | None = None
+        self,
+        write_reply: str | int = "drop",
+        port: int = 0,
+        hold: asyncio.Event | None = None,
+        read_delay: float = 0.0,
     ) -> None:
         self.write_reply = write_reply
         self.requested_port = port  # 0: a free port
         self.hold = hold  # while set and not yet triggered, reads get no answer
-        self.hr = [0] * 100
+        self.read_delay = read_delay  # a slow device: seconds before a read is answered
+        # (loop time, function code, address) of every frame, when it arrived
+        self.arrivals: list[tuple[float, int, int]] = []
+        self.hr = [0] * 400  # room for reads split into several requests
         self.co = [False] * 100
         self.received: Counter = Counter()  # (function code, address) -> frames received
         self.server: asyncio.base_events.Server | None = None
@@ -64,20 +71,40 @@ class DropWriteRepliesDevice:
         return Counter({k: v for k, v in self.received.items() if k[0] in (5, 6, 15, 16, 22)})
 
     async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        pending: set[asyncio.Task] = set()
         try:
             while True:
                 tid, _pid, length, unit = struct.unpack(">HHHB", await reader.readexactly(7))
                 pdu = await reader.readexactly(length - 1)
+                address = struct.unpack(">H", pdu[1:3])[0] if len(pdu) >= 3 else 0
+                self.arrivals.append((asyncio.get_running_loop().time(), pdu[0], address))
                 reply = self._handle(pdu[0], pdu[1:])
-                if self.hold is not None and pdu[0] in (1, 2, 3, 4):
-                    await self.hold.wait()  # a hung device: the read waits
-                if reply is not None:
-                    writer.write(struct.pack(">HHHB", tid, 0, len(reply) + 1, unit) + reply)
+                if reply is None:
+                    continue
+                frame = struct.pack(">HHHB", tid, 0, len(reply) + 1, unit) + reply
+                if pdu[0] in (1, 2, 3, 4) and (self.hold is not None or self.read_delay):
+                    # Answer later, from a task, so frames behind it are still read
+                    # (and timestamped) as soon as they arrive.
+                    task = asyncio.create_task(self._answer_later(writer, frame))
+                    pending.add(task)
+                    task.add_done_callback(pending.discard)
+                else:
+                    writer.write(frame)
                     await writer.drain()
         except (asyncio.IncompleteReadError, ConnectionError):
             pass
         finally:
+            for task in pending:
+                task.cancel()
             writer.close()
+
+    async def _answer_later(self, writer: asyncio.StreamWriter, frame: bytes) -> None:
+        if self.hold is not None:
+            await self.hold.wait()  # a hung device: the read waits
+        await asyncio.sleep(self.read_delay)
+        if not writer.is_closing():
+            writer.write(frame)
+            await writer.drain()
 
     def _handle(self, fc: int, data: bytes) -> bytes | None:
         address = struct.unpack(">H", data[:2])[0]
