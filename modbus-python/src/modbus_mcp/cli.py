@@ -59,6 +59,9 @@ WRITE_REPLY_MISMATCH = (
     "the write may have been applied; check before retrying"
 )
 READ_REPLY_MISMATCH = "the device's reply does not match the request"
+# How long the server waits for the device when it starts; after that it serves
+# MCP anyway and connects on the first tool call.
+STARTUP_CONNECT_TIMEOUT = 1.0
 WRITE_TOOLS = frozenset(
     {
         "write_register",
@@ -149,10 +152,12 @@ WordOrder = Annotated[
     Field(description="Register order for values wider than 16 bits ('big' = high word first)."),
 ]
 Scale = Annotated[
-    float, Field(allow_inf_nan=False, description="Multiply each decoded value by this.")
+    float,
+    Field(strict=True, allow_inf_nan=False, description="Multiply each decoded value by this."),
 ]
 Offset = Annotated[
-    float, Field(allow_inf_nan=False, description="Then add this to each decoded value.")
+    float,
+    Field(strict=True, allow_inf_nan=False, description="Then add this to each decoded value."),
 ]
 
 
@@ -952,7 +957,10 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     client = _make_client(settings, gate)
     gate.client = client
     try:
-        await client.connect()
+        # Bounded: an unreachable host must not hold up initialize (pymodbus' own
+        # connect timeout is 3 s); tool calls connect later anyway.
+        with anyio.move_on_after(STARTUP_CONNECT_TIMEOUT):
+            await client.connect()
     except Exception as exc:  # e.g. a serial port that cannot be opened
         log.warning("Connecting to %s failed: %s: %s", settings.target, type(exc).__name__, exc)
     if getattr(client, "connected", False):
@@ -1162,10 +1170,11 @@ class ModbusMCP(FastMCP):
                 error = str(exc)
             meta: dict[str, Any] = {"tool": name}
             if name in WRITE_TOOLS:
-                if isinstance(cause, ValidationError):
+                state = _CALL.get()
+                if isinstance(cause, ValidationError) or (state is not None and not state.sent):
                     meta.update(outcome="not_sent", request_sent=False)
-                else:  # raised somewhere in the tool: whether a request went out is unknown
-                    meta.update(outcome="unknown", request_sent=None)
+                else:  # it raised after sending (or it is not known whether it sent)
+                    meta.update(outcome="unknown", request_sent=True if state else None)
                     error += f"; {MAY_HAVE_BEEN_APPLIED}"
             return self._envelope(tool, _make_result(False, error=error, meta=meta))
 

@@ -73,6 +73,8 @@ def call(name: str, arguments: dict) -> dict:
         ("read_input_typed", {"address": 0, "dtype": "int32", "count": 0}, "count"),
         ("read_holding_typed", {"address": 0, "dtype": "int32", "scale": "nan"}, "scale"),
         ("read_device_information", {"read_code": 9}, "read_code"),
+        ("read_holding_typed", {"address": 0, "dtype": "int32", "scale": True}, "scale"),
+        ("read_input_typed", {"address": 0, "dtype": "int32", "offset": "0.5"}, "offset"),
     ],
 )
 def test_invalid_arguments_return_an_envelope(tool: str, arguments: dict, fragment: str) -> None:
@@ -229,3 +231,19 @@ def check_annotations(tools) -> None:
 
 def test_tool_annotations_do_not_invite_retries() -> None:
     check_annotations(asyncio.run(cli.mcp.list_tools()))
+
+
+def test_an_unexpected_error_before_anything_was_sent_is_not_sent(client, monkeypatch) -> None:
+    tags = {"Speed": {"table": "holding", "address": 10, "dtype": "float32"}}
+    app = make_ctx(client, tags, writes_enabled=True).request_context.lifespan_context
+    monkeypatch.setattr(cli, "_app", lambda ctx: app)
+
+    def explode(*args, **kwargs):
+        raise RuntimeError("encoder exploded")
+
+    monkeypatch.setattr(cli.codec, "encode", explode)
+    envelope = call("write_tag", {"name": "Speed", "value": 1.5})
+    assert envelope["success"] is False
+    assert envelope["error"] == "Unexpected RuntimeError: encoder exploded"
+    assert envelope["meta"]["outcome"] == "not_sent" and envelope["meta"]["request_sent"] is False
+    assert client.calls == []

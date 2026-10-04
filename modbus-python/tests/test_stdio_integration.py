@@ -8,6 +8,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from importlib.metadata import version
 from pathlib import Path
 from types import SimpleNamespace
@@ -249,6 +250,16 @@ async def test_server_reconnects_after_the_device_restarts(tmp_path) -> None:
                 assert back["success"], back
                 assert back["data"] == {"value": 50}
                 assert any("reconnected" in str(data) for _, data in srv.logs)
+
+
+async def test_initialize_does_not_wait_for_an_unreachable_host(tmp_path) -> None:
+    """192.0.2.1 (TEST-NET-1) never answers: pymodbus would wait 3 s to connect."""
+    target = SimpleNamespace(host="192.0.2.1", port=502)
+    started = time.monotonic()
+    async with server(target, tmp_path) as srv:
+        elapsed = time.monotonic() - started
+        assert len((await srv.session.list_tools()).tools) == 17
+    assert elapsed < 2.5, elapsed
 
 
 async def test_starts_without_a_device_and_connects_when_it_appears(tmp_path) -> None:
