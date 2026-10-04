@@ -1,8 +1,8 @@
 """Server configuration, read from the environment when the server starts.
 
 Nothing here runs at import time: ``modbus_mcp.cli.load_config()``, called from
-``main()``, merges the process environment, an optional ``--env-file`` and an
-automatically found ``.env`` (which may not set the write switch), then calls
+``main()``, merges the process environment, an optional ``--env-file`` and the
+project's own ``.env`` (which may not set the write switch), then calls
 :meth:`Settings.from_env` and :func:`load_tag_map`. A bad value stops the server
 at startup with a message, instead of surfacing later as a failed tool call.
 """

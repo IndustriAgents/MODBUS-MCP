@@ -14,14 +14,16 @@ import json
 import logging
 import math
 import os
+import re
 import sys
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from dotenv import dotenv_values, find_dotenv
+from dotenv import dotenv_values
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.fastmcp.prompts import base
@@ -173,41 +175,108 @@ _config: tuple[Settings, dict[str, Tag]] | None = None
 
 # Settings that let the server change the device. They are honoured only from
 # the real process environment or a file passed explicitly with --env-file,
-# never from a .env file found automatically: when an MCP client launches the
-# server, that search can reach the client's own project, which may not be
-# trusted, and a .env there must not be able to switch writes on.
+# never from the .env file loaded automatically.
 GATE_VARIABLES = ("MODBUS_WRITES_ENABLED",)
+# Besides MODBUS_*, the only setting the automatically loaded .env may set.
+OWN_EXTRAS = ("REGISTER_MAP_FILE",)
+PACKAGE_DIR = Path(__file__).resolve().parent
+_EXPORT_PREFIX = re.compile(r"^\s*export\s+", re.IGNORECASE)
+_PROJECT_NAME = re.compile(r'^name\s*=\s*"modbus-mcp"\s*$', re.MULTILINE)
 
 
-def load_config(env_file: str | None = None) -> tuple[Settings, dict[str, Tag]]:
-    """Read the settings and the tag map, without changing os.environ.
+def implicit_dotenv(package_dir: Path = PACKAGE_DIR) -> Path | None:
+    """The one .env file read automatically: modbus-python/.env of a source checkout.
 
-    Sources, highest precedence first: the process environment, then `env_file`
-    (--env-file), then a `.env` found automatically by searching up from this
-    package's directory (python-dotenv's default search, as before). The
-    automatically found file may set connection settings but no GATE_VARIABLES:
-    those are ignored, with a warning on stderr naming them.
+    It is found relative to the package source (src/modbus_mcp -> ../../.env) and
+    only when that directory is this project (its pyproject.toml names
+    modbus-mcp). Never the working directory or a parent directory: the working
+    directory is wherever the MCP client launched the server, which may be an
+    untrusted project, and settings such as the host or the tag map decide where
+    a write goes. An installed package (site-packages) has no implicit .env; use
+    the environment or --env-file.
+    """
+    if package_dir.parent.name != "src":
+        return None
+    project = package_dir.parent.parent
+    try:
+        if not _PROJECT_NAME.search((project / "pyproject.toml").read_text(encoding="utf-8")):
+            return None
+    except OSError:
+        return None
+    candidate = project / ".env"
+    return candidate if candidate.is_file() else None
+
+
+def _env_key(key: str) -> str:
+    """Normalise a .env key: no `export` prefix or quotes, stripped, upper case.
+
+    Windows treats environment variable names case-insensitively (and upper-cases
+    them), so modbus_writes_enabled in a .env must count as MODBUS_WRITES_ENABLED.
+    """
+    return _EXPORT_PREFIX.sub("", key).strip().strip("'\"").strip().upper()
+
+
+def _read_env_file(path: str | Path) -> dict[str, str]:
+    """A .env file's settings with normalised keys (python-dotenv parses quotes and export)."""
+    return {_env_key(k): v for k, v in dotenv_values(path).items() if v is not None}
+
+
+def _gates_in(path: str | Path) -> set[str]:
+    """Gate variables a .env file tries to set, including on lines python-dotenv cannot parse."""
+    gates = set()
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            key, sep, _ = line.partition("=")
+            if sep and _env_key(key) in GATE_VARIABLES:
+                gates.add(_env_key(key))
+    return gates
+
+
+def _warn(message: str) -> None:
+    sys.stderr.write(f"modbus-mcp: warning: {message}\n")
+
+
+def read_environment(env_file: str | None = None) -> dict[str, str]:
+    """The variables the settings are read from, without changing os.environ.
+
+    Highest precedence first: the process environment; `env_file` (--env-file),
+    honoured in full; the implicit .env (implicit_dotenv()), which may only set
+    this server's own non-gate settings (MODBUS_* except GATE_VARIABLES, and
+    OWN_EXTRAS). Anything else in it, such as MODBUS_WRITES_ENABLED, PATH or
+    PYTHONPATH, is ignored with a warning on stderr naming it. Keys from both
+    files are compared case-insensitively (see _env_key), as Windows does.
     """
     env = dict(os.environ)
     if env_file is not None:
         if not os.path.isfile(env_file):
             raise ConfigError(f"--env-file {env_file!r} does not exist")
-        for key, value in dotenv_values(env_file).items():
-            if value is not None:
-                env.setdefault(key, value)
-    found = find_dotenv()
-    if found and not (env_file and os.path.realpath(found) == os.path.realpath(env_file)):
-        for key, value in dotenv_values(found).items():
-            if value is None:
-                continue
-            if key in GATE_VARIABLES:
-                sys.stderr.write(
-                    f"modbus-mcp: warning: ignoring {key} from {found}: it is only read from"
-                    " the process environment or a file given with --env-file\n"
-                )
-                continue
+        for key, value in _read_env_file(env_file).items():
             env.setdefault(key, value)
-    settings = Settings.from_env(env)
+    found = implicit_dotenv()
+    if found is None or (env_file and os.path.realpath(found) == os.path.realpath(env_file)):
+        return env
+    values = _read_env_file(found)
+    for gate in sorted((set(values) | _gates_in(found)) & set(GATE_VARIABLES)):
+        _warn(
+            f"ignoring {gate} from {found}: it is only read from the process"
+            " environment or a file given with --env-file"
+        )
+    for key, value in values.items():
+        if key in GATE_VARIABLES:
+            continue
+        if not (key.startswith("MODBUS_") or key in OWN_EXTRAS):
+            _warn(
+                f"ignoring {key} from {found}: the automatically loaded .env may only set"
+                f" modbus-mcp's own settings (MODBUS_*, {', '.join(OWN_EXTRAS)})"
+            )
+            continue
+        env.setdefault(key, value)
+    return env
+
+
+def load_config(env_file: str | None = None) -> tuple[Settings, dict[str, Tag]]:
+    """Read the settings (see read_environment) and the tag map."""
+    settings = Settings.from_env(read_environment(env_file))
     return settings, load_tag_map(settings.register_map_file)
 
 

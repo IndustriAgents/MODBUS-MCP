@@ -115,8 +115,8 @@ def no_modbus_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
 
 
 def found_dotenv(monkeypatch: pytest.MonkeyPatch, path) -> None:
-    """Make `path` the .env that python-dotenv's search would find automatically."""
-    monkeypatch.setattr(cli, "find_dotenv", lambda *a, **k: str(path))
+    """Make `path` the .env the server loads automatically (implicit_dotenv())."""
+    monkeypatch.setattr(cli, "implicit_dotenv", lambda *a, **k: path)
 
 
 def test_an_automatically_found_env_sets_connection_settings(no_modbus_env, tmp_path) -> None:
@@ -140,8 +140,141 @@ def test_an_automatically_found_env_cannot_enable_writes(no_modbus_env, tmp_path
     assert "ignoring MODBUS_WRITES_ENABLED" in err and str(dotenv) in err
 
 
+@pytest.mark.parametrize(
+    "line",
+    [
+        "modbus_writes_enabled=true",
+        "Modbus_Writes_Enabled=yes",
+        "export MODBUS_WRITES_ENABLED=on",
+        "export   modbus_writes_enabled = 'true'",
+        'MODBUS_WRITES_ENABLED="true"',
+        "  MODBUS_WRITES_ENABLED = 1 ",
+        "EXPORT MODBUS_WRITES_ENABLED=true",  # python-dotenv cannot parse this one
+    ],
+)
+def test_the_gate_filter_ignores_case_export_and_quotes(no_modbus_env, tmp_path, capsys, line):
+    # Windows upper-cases environment names, so a lower-case key in a .env would
+    # be MODBUS_WRITES_ENABLED there; the filter must catch every spelling.
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(f"{line}\nexport modbus_port=1502\n")
+    found_dotenv(no_modbus_env, dotenv)
+    settings, _ = cli.load_config()
+    assert settings.writes_enabled is False
+    assert settings.port == 1502  # keys are normalised, so connection settings still apply
+    assert "ignoring MODBUS_WRITES_ENABLED" in capsys.readouterr().err
+
+
+def test_an_explicit_env_file_with_a_lower_case_key_can_enable_writes(no_modbus_env, tmp_path):
+    no_modbus_env.setattr(cli, "implicit_dotenv", lambda *a, **k: None)
+    env_file = tmp_path / "plant.env"
+    env_file.write_text("export modbus_writes_enabled='true'\n")
+    assert cli.load_config(str(env_file))[0].writes_enabled is True
+
+
+FOREIGN = ["PATH", "LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "PYTHONPATH", "PYTHONSTARTUP", "FOO"]
+
+
+def test_the_implicit_env_sets_only_this_servers_settings(no_modbus_env, tmp_path, capsys):
+    for key in FOREIGN[1:]:
+        no_modbus_env.delenv(key, raising=False)
+    tags = tmp_path / "tags.json"
+    tags.write_text("{}")
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(
+        "".join(f"{key}=/from/dotenv\n" for key in FOREIGN)
+        + f"MODBUS_PORT=1502\nregister_map_file={tags}\n"
+    )
+    found_dotenv(no_modbus_env, dotenv)
+    env = cli.read_environment()
+    assert env["MODBUS_PORT"] == "1502" and env["REGISTER_MAP_FILE"] == str(tags)
+    assert env["PATH"] == os.environ["PATH"]
+    for key in FOREIGN[1:]:
+        assert key not in env, key
+    err = capsys.readouterr().err
+    for key in FOREIGN:
+        assert f"ignoring {key} from {dotenv}" in err, key
+
+
+def test_an_explicit_env_file_is_honoured_in_full(no_modbus_env, tmp_path, capsys):
+    no_modbus_env.setattr(cli, "implicit_dotenv", lambda *a, **k: None)
+    no_modbus_env.delenv("FOO", raising=False)
+    env_file = tmp_path / "plant.env"
+    env_file.write_text("FOO=bar\nMODBUS_PORT=1502\n")
+    env = cli.read_environment(str(env_file))
+    assert env["FOO"] == "bar" and env["MODBUS_PORT"] == "1502"
+    assert capsys.readouterr().err == ""
+
+
+def _checkout(root, *, name="modbus-mcp", installed=False):
+    """A fake package layout under `root`; returns the package directory."""
+    if installed:
+        package = root / "site-packages" / "modbus_mcp"
+        package.mkdir(parents=True)
+        return package
+    project = root / "modbus-python"
+    package = project / "src" / "modbus_mcp"
+    package.mkdir(parents=True)
+    (project / "pyproject.toml").write_text(f'[project]\nname = "{name}"\nversion = "0"\n')
+    return package
+
+
+def test_the_implicit_env_is_only_the_projects_own(tmp_path) -> None:
+    package = _checkout(tmp_path)
+    (tmp_path / ".env").write_text("MODBUS_PORT=1\n")  # a parent of the project
+    assert cli.implicit_dotenv(package) is None
+    own = tmp_path / "modbus-python" / ".env"
+    own.write_text("MODBUS_PORT=2\n")
+    assert cli.implicit_dotenv(package) == own
+
+
+def test_no_implicit_env_for_an_installed_package_or_another_project(tmp_path) -> None:
+    installed = _checkout(tmp_path / "a", installed=True)
+    (installed.parent / ".env").write_text("MODBUS_PORT=1\n")
+    (installed.parent.parent / ".env").write_text("MODBUS_PORT=1\n")
+    assert cli.implicit_dotenv(installed) is None
+    other = _checkout(tmp_path / "b", name="someone-else")
+    (tmp_path / "b" / "modbus-python" / ".env").write_text("MODBUS_PORT=1\n")
+    assert cli.implicit_dotenv(other) is None
+    # Installed (not under src/), even next to a pyproject.toml that names us.
+    lookalike = tmp_path / "c" / "lib" / "site-packages" / "modbus_mcp"
+    lookalike.mkdir(parents=True)
+    (lookalike.parent.parent / "pyproject.toml").write_text('[project]\nname = "modbus-mcp"\n')
+    (lookalike.parent.parent / ".env").write_text("MODBUS_PORT=1\n")
+    assert cli.implicit_dotenv(lookalike) is None
+
+
+@pytest.mark.parametrize("where", ["cwd", "parent of cwd"])
+def test_a_env_in_the_working_directory_or_a_parent_is_not_read(tmp_path, where) -> None:
+    # The real lookup, run from a directory that has a .env (or whose parent has one).
+    root = tmp_path / "untrusted-project"
+    cwd = root if where == "cwd" else root / "sub"
+    cwd.mkdir(parents=True)
+    (root / ".env").write_text(
+        "MODBUS_HOST=from-untrusted-dotenv\nMODBUS_WRITES_ENABLED=true\nREGISTER_MAP_FILE=/x\n"
+    )
+    code = (
+        "from modbus_mcp import cli; env = cli.read_environment(); "
+        "print(env.get('MODBUS_HOST'), env.get('MODBUS_WRITES_ENABLED'), "
+        "env.get('REGISTER_MAP_FILE'), cli.implicit_dotenv())"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=cwd,
+        env=clean_env(),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "from-untrusted-dotenv" not in proc.stdout and "True" not in proc.stdout
+    host, writes, tag_map, found = proc.stdout.split()
+    assert host != "from-untrusted-dotenv" and tag_map != "/x" and writes == "None"
+    assert found == "None" or not found.startswith(str(root)), found
+    assert "untrusted-project" not in proc.stderr
+
+
 def test_an_explicit_env_file_can_enable_writes(no_modbus_env, tmp_path, capsys) -> None:
-    no_modbus_env.setattr(cli, "find_dotenv", lambda *a, **k: "")  # no .env found
+    no_modbus_env.setattr(cli, "implicit_dotenv", lambda *a, **k: None)  # no .env
     env_file = tmp_path / "plant.env"
     env_file.write_text("MODBUS_WRITES_ENABLED=true\nMODBUS_PORT=1503\n")
     settings, _ = cli.load_config(str(env_file))
