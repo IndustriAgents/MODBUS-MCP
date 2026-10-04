@@ -85,6 +85,13 @@ after the write went out, including a garbled or mismatched reply, exception 4
 `unknown`. Whether a frame went out is known exactly (pymodbus' trace hook), so
 a failure before sending is `not_sent`.
 
+A write that has not gone out is never sent after its call was abandoned: when
+the client cancels it, when the client disconnects (the server stops every
+pending call as soon as stdin closes), or when the call's deadline passes. The
+last check runs right before the request is handed to the transport, with no
+await in between, so a write that was queued, reconnecting or waiting cannot
+be sent late.
+
 The tools also tell MCP clients not to retry writes: they are annotated
 `destructiveHint: true`, `idempotentHint: false`.
 

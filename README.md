@@ -47,10 +47,10 @@ Each of `modbus-python/` and `modbus-mock-server/` is its own uv project with a 
 
 | Project | Locked | Supported range (in `pyproject.toml`) |
 |---------|--------|----------------------------------------|
-| `modbus-python` | `mcp` 1.30.0, `pymodbus` 3.15.0, `python-dotenv` 1.2.4, `pyserial` 3.5 | `mcp>=1.7.0,<2`, `pymodbus[serial]>=3.9.2,<3.16`, `python-dotenv>=1.1.0` |
+| `modbus-python` | `mcp` 1.30.0, `pymodbus` 3.15.0, `python-dotenv` 1.2.4, `pyserial` 3.5 | `mcp>=1.12.3,<2`, `pymodbus[serial]>=3.9.2,<3.16`, `python-dotenv>=1.1.0` |
 | `modbus-mock-server` | `pymodbus` 3.12.1 | `pymodbus>=3.11.1,<3.13` |
 
-The ranges are what the test suite passes on: the server's full suite (unit tests plus the stdio and mock integration tests) passed with the latest patch release of every pymodbus minor from 3.9 to 3.15 (3.9.2, 3.10.0, 3.11.4, 3.12.1, 3.13.1, 3.14.0, 3.15.0) and with mcp 1.7.0, 1.9.4, 1.10.1, 1.12.4, 1.16.0, 1.20.0, 1.25.0 and 1.30.0. CI runs it on the lockfile and on the lowest version of every direct dependency (`uv pip install --resolution lowest-direct`: mcp 1.7.0, pymodbus 3.9.2, python-dotenv 1.1.0, pyserial 3.5). mcp 1.7.0 is the first release with tool annotations; `mcp` 2.x removed the `mcp.server.fastmcp` module this server is built on. The mock's limits are explained in its [Known issues](modbus-mock-server/README.md#known-issues).
+The ranges are what the test suite passes on: the server's full suite (unit tests plus the stdio and mock integration tests) passed with the latest patch release of every pymodbus minor from 3.9 to 3.15 (3.9.2, 3.10.0, 3.11.4, 3.12.1, 3.13.1, 3.14.0, 3.15.0) and with mcp 1.12.3, 1.16.0, 1.20.0, 1.25.0 and 1.30.0. CI runs it on the lockfile and on the lowest version of every direct dependency (`uv pip install --resolution lowest-direct`: mcp 1.12.3, pymodbus 3.9.2, python-dotenv 1.1.0, pyserial 3.5). Up to mcp 1.12.2, a client cancelling a call (`notifications/cancelled`) left the server unable to answer any later request, so 1.12.3 is the floor; `mcp` 2.x removed the `mcp.server.fastmcp` module this server is built on. The mock's limits are explained in its [Known issues](modbus-mock-server/README.md#known-issues).
 
 ## Quick Start (Local)
 
@@ -119,6 +119,8 @@ The write tools also say what happened to the write, in `meta.outcome` and `meta
 - `unknown`: it went out, and then there was no reply, a reply that does not echo the request, an exception that does not rule a write out (such as 4 Server Device Failure), or the deadline passed. The error says `"the write may have been applied; check before retrying"`; for a lost reply it is `"no reply; the write may have been applied; check before retrying"`.
 
 A write is sent at most once. Read the value back before writing again after an `unknown`.
+
+A write that has not gone out yet is never sent once nobody wants it any more: when the client cancels the call (`notifications/cancelled`), when the client disconnects (stdin closes; the server then stops every pending call and exits), or when the call's deadline passes. A last check runs right before each request is handed to the transport. Such a write is `not_sent`.
 
 | Kind | Tools |
 |------|-------|

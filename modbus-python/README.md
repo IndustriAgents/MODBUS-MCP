@@ -52,7 +52,7 @@ The MCP server of [MODBUS-MCP](../README.md). It is a [uv](https://docs.astral.s
    ```bash
    uv sync
    ```
-   This installs the versions pinned in the committed `uv.lock` (`mcp` 1.30.0, `pymodbus` 3.15.0 with `pyserial` 3.5 for serial ports) plus the dev tools (pytest, ruff). The supported ranges in `pyproject.toml` are `mcp>=1.7.0,<2`, `pymodbus[serial]>=3.9.2,<3.16` and `python-dotenv>=1.1.0`: the full test suite passed with the latest patch release of every pymodbus minor from 3.9 to 3.15 and with mcp 1.7.0, 1.9.4, 1.10.1, 1.12.4, 1.16.0, 1.20.0, 1.25.0 and 1.30.0, and CI runs it on every change with the lowest version of every direct dependency (mcp 1.7.0, pymodbus 3.9.2, python-dotenv 1.1.0, pyserial 3.5). mcp 1.7.0 is the first release with tool annotations. pymodbus 3.10 renamed the unit-id keyword from `slave` to `device_id`; the server uses whichever the installed version takes. mcp 2.x removed `mcp.server.fastmcp` and is not supported.
+   This installs the versions pinned in the committed `uv.lock` (`mcp` 1.30.0, `pymodbus` 3.15.0 with `pyserial` 3.5 for serial ports) plus the dev tools (pytest, ruff). The supported ranges in `pyproject.toml` are `mcp>=1.12.3,<2`, `pymodbus[serial]>=3.9.2,<3.16` and `python-dotenv>=1.1.0`: the full test suite passed with the latest patch release of every pymodbus minor from 3.9 to 3.15 and with mcp 1.12.3, 1.16.0, 1.20.0, 1.25.0 and 1.30.0, and CI runs it on every change with the lowest version of every direct dependency (mcp 1.12.3, pymodbus 3.9.2, python-dotenv 1.1.0, pyserial 3.5). Up to mcp 1.12.2, a client cancelling a call (`notifications/cancelled`) left FastMCP unable to answer any later request (checked with a stock FastMCP server), so 1.12.3 is the floor. pymodbus 3.10 renamed the unit-id keyword from `slave` to `device_id`; the server uses whichever the installed version takes. mcp 2.x removed `mcp.server.fastmcp` and is not supported.
 
 ## Configuration
 
@@ -148,7 +148,9 @@ The write tools add `meta.outcome` and `meta.request_sent`:
 - `not_sent` (`request_sent: false`): refused before sending, because writes are disabled, the arguments are invalid, the device is unreachable, or encoding failed locally; whether a frame went out is known exactly, from pymodbus' `trace_packet` hook;
 - `unknown` (`request_sent: true`): it went out, and then there was no reply (`"no reply; the write may have been applied; check before retrying"`), a reply that does not echo the request (`meta.reply_mismatch`), another exception (4 Server Device Failure, 5 Acknowledge, 8, 11), or the call's deadline passed.
 
-Nothing is sent twice, so read the value back before writing again after an `unknown`. The examples use addresses that exist on the [mock device](../modbus-mock-server/README.md#register-map-unitslave-id-any) (every table holds addresses 0-99; 10-99 are unused, free for experiments); the writes need `MODBUS_WRITES_ENABLED=true`.
+Nothing is sent twice, so read the value back before writing again after an `unknown`.
+
+A write that has not gone out is never sent after the call was abandoned: the client cancelled it (`notifications/cancelled`), the client disconnected (stdin closed; pending calls are stopped and the server exits with status 0), or the call's deadline passed. `SendGate`, the last check right before pymodbus hands a request to the transport, refuses it; the result is `not_sent`. The examples use addresses that exist on the [mock device](../modbus-mock-server/README.md#register-map-unitslave-id-any) (every table holds addresses 0-99; 10-99 are unused, free for experiments); the writes need `MODBUS_WRITES_ENABLED=true`.
 
 1. Read one holding register (Valve Position on the mock)
    ```json
@@ -290,7 +292,6 @@ The integration tests (`-m integration`) start the mock device from `../modbus-m
 
 ## Known issues
 
-- **With mcp 1.7.x the server does not exit when stdin closes.** That is the mcp SDK's stdio transport (fixed in 1.8.0); MCP clients stop it with SIGTERM afterwards, as the protocol specifies. The locked mcp 1.30.0 exits on its own.
 - **A malformed coil echo can pass as ON.** pymodbus decodes any non-zero value in a write_coil reply as ON, so a device that echoes ON as something other than `0xFF00` is still reported `written`. An echo of the other state is caught (`unknown`).
 
 ## Testing, Security and Contributing
