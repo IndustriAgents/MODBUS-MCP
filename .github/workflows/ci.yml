@@ -137,3 +137,48 @@ jobs:
           assert callable(ep.load()), ep
           print("console script modbus-mock-server ->", ep.value)
           EOF
+
+      # pyproject.toml allows pymodbus 3.11.1-3.12; uv.lock pins 3.12.1, which the
+      # server job's integration tests run against. Start the mock on the lowest
+      # allowed version too and check it over Modbus TCP.
+      - name: Start the mock on the lowest direct dependencies and probe it
+        run: |
+          venv="${RUNNER_TEMP:-/tmp}/mock-lowest"
+          uv venv --python 3.10 "$venv"
+          VIRTUAL_ENV="$venv" uv pip install --resolution lowest-direct -e .
+          VIRTUAL_ENV="$venv" uv pip list | grep -i '^pymodbus '
+          "$venv/bin/python" - <<'EOF'
+          import asyncio
+          import socket
+          from importlib.metadata import version
+
+          from pymodbus.client import AsyncModbusTcpClient
+
+          import modbus_local_server as m
+
+
+          async def main() -> None:
+              with socket.socket() as sock:  # a free port
+                  sock.bind(("127.0.0.1", 0))
+                  port = sock.getsockname()[1]
+              server = asyncio.create_task(m.run_server("127.0.0.1", port, 0.2))
+              client = AsyncModbusTcpClient("127.0.0.1", port=port)
+              for _ in range(50):
+                  if await client.connect():
+                      break
+                  await asyncio.sleep(0.1)
+              hr = await client.read_holding_registers(0, count=10, device_id=1)
+              assert hr.registers == m.INITIAL_HOLDING, hr
+              edge = await client.read_holding_registers(99, count=1, device_id=1)
+              assert not edge.isError(), edge
+              past = await client.read_holding_registers(100, count=1, device_id=1)
+              assert past.isError() and past.exception_code == 2, past
+              ident = await client.read_device_information(read_code=3, device_id=1)
+              assert ident.information[0] == b"Mock ICS", ident
+              client.close()
+              server.cancel()
+              print(f"mock on pymodbus {version('pymodbus')}: values, table size and identity OK")
+
+
+          asyncio.run(main())
+          EOF
