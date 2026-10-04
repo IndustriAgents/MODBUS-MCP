@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from conftest import make_ctx, run
+from conftest import FakeResponse, make_ctx, run
 from pymodbus.exceptions import ConnectionException
 
 from modbus_mcp import cli
@@ -137,3 +137,120 @@ def test_pymodbus_does_not_resend_either(modbus_type: str) -> None:
             client.close()
 
     assert asyncio.run(build()) == 0
+
+
+# --- what counts as "rejected" after a send (suite rule 1a) ---------------------------
+
+REFUSAL_CODES = [1, 2, 3, 6, 10]  # the request was refused: nothing was done
+NOT_A_REFUSAL = [4, 5, 8, 11, 99]  # failed while acting, accepted, or no answer from the target
+
+
+def reply_with(client, response) -> None:
+    async def write_register(address, value, *, device_id=1):
+        client.sent.append(("write_register", {"address": address, "value": value}))
+        return response(address, value)
+
+    client.write_register = write_register
+
+
+@pytest.mark.parametrize("code", REFUSAL_CODES)
+def test_a_refusing_exception_is_rejected(client, code: int) -> None:
+    reply_with(client, lambda a, v: FakeResponse(error=code, function_code=6))
+    result = run(cli.write_register(1, 50, make_ctx(client, writes_enabled=True)))
+    assert result["meta"]["outcome"] == "rejected" and result["meta"]["request_sent"] is True
+    assert result["meta"]["exception_code"] == code
+    assert "may have been applied" not in result["error"]
+
+
+@pytest.mark.parametrize("code", NOT_A_REFUSAL)
+def test_other_exceptions_leave_the_write_unknown(client, code: int) -> None:
+    reply_with(client, lambda a, v: FakeResponse(error=code, function_code=6))
+    result = run(cli.write_register(1, 50, make_ctx(client, writes_enabled=True)))
+    assert result["success"] is False
+    assert result["meta"]["outcome"] == "unknown" and result["meta"]["request_sent"] is True
+    assert result["error"].endswith("the write may have been applied; check before retrying")
+    assert len(client.sent) == 1
+
+
+@pytest.mark.parametrize(
+    ("reply", "field"),
+    [
+        (lambda a, v: FakeResponse(function_code=6, address=a, registers=[v + 1]), "registers"),
+        (lambda a, v: FakeResponse(function_code=6, address=a + 1, registers=[v]), "address"),
+        (lambda a, v: FakeResponse(function_code=3, address=a, registers=[v]), "function_code"),
+        (lambda a, v: FakeResponse(function_code=6, address=a), "registers"),  # empty echo
+    ],
+)
+def test_a_reply_that_does_not_echo_the_write_is_unknown(client, reply, field) -> None:
+    reply_with(client, reply)
+    result = run(cli.write_register(1, 50, make_ctx(client, writes_enabled=True)))
+    assert result["success"] is False
+    assert result["meta"]["outcome"] == "unknown" and result["meta"]["request_sent"] is True
+    assert field in result["meta"]["reply_mismatch"]
+    assert result["error"] == (
+        "the device's reply does not match the write; "
+        "the write may have been applied; check before retrying"
+    )
+
+
+@pytest.mark.parametrize("name", list(WRITE_CALLS))
+def test_a_correct_echo_is_written(client, name: str) -> None:
+    result = run(WRITE_CALLS[name](make_ctx(client, TAGS, writes_enabled=True)))
+    assert result["success"], result
+    assert result["meta"]["outcome"] == "written"
+
+
+# --- failures before the request went out are not_sent (rule 1a, clarified) -------------
+
+
+def test_a_local_encoding_failure_is_not_sent(client) -> None:
+    async def write_register(address, value, *, device_id=1):
+        raise ValueError("cannot encode")  # e.g. while building the frame; nothing sent
+
+    client.write_register = write_register
+    result = run(cli.write_register(1, 50, make_ctx(client, writes_enabled=True)))
+    assert result["meta"]["outcome"] == "not_sent" and result["meta"]["request_sent"] is False
+    assert result["error"] == "the write was not sent: Unexpected ValueError: cannot encode"
+    assert "may have been applied" not in result["error"]
+
+
+def test_a_timeout_before_sending_is_not_sent(client) -> None:
+    async def write_register(address, value, *, device_id=1):
+        await asyncio.sleep(1)  # e.g. waiting for pymodbus' lock behind another request
+        return client._enter("write_register", address=address, value=value)
+
+    client.write_register = write_register
+    ctx = make_ctx(client, writes_enabled=True, tool_timeout=0.05)
+    result = run(cli.write_register(1, 50, ctx))
+    assert result["meta"]["outcome"] == "not_sent" and result["meta"]["request_sent"] is False
+    assert result["error"].startswith("the write was not sent: TimeoutError")
+    assert client.sent == []
+
+
+def test_an_unexpected_failure_after_sending_is_unknown(client) -> None:
+    async def write_register(address, value, *, device_id=1):
+        client._enter("write_register", address=address, value=value)  # it went out
+        raise ValueError("bad reply")
+
+    client.write_register = write_register
+    result = run(cli.write_register(1, 50, make_ctx(client, writes_enabled=True)))
+    assert result["meta"]["outcome"] == "unknown" and result["meta"]["request_sent"] is True
+    assert result["error"].endswith("the write may have been applied; check before retrying")
+
+
+def test_the_frame_counter_counts_only_frames_being_sent() -> None:
+    counter = cli.FrameCounter()
+    assert counter(True, b"\x01") == b"\x01" and counter(False, b"\x02") == b"\x02"
+    assert counter.sent == 1
+
+
+def test_the_real_client_gets_the_frame_counter() -> None:
+    async def build():
+        counter = cli.FrameCounter()
+        client = cli._make_client(Settings(), counter)
+        try:
+            return client.ctx.trace_packet is counter
+        finally:
+            client.close()
+
+    assert asyncio.run(build())

@@ -21,9 +21,21 @@ from pymodbus.exceptions import ConnectionException, ModbusIOException
 
 
 class FakeResponse:
-    def __init__(self, registers=None, bits=None, error: int | None = None, function_code=3):
+    def __init__(
+        self,
+        registers=None,
+        bits=None,
+        error: int | None = None,
+        function_code=3,
+        address=0,
+        count=0,
+        and_mask=None,
+        or_mask=None,
+    ):
         self.registers = list(registers or [])
         self.bits = list(bits or [])
+        self.address, self.count = address, count
+        self.and_mask, self.or_mask = and_mask, or_mask
         self.exception_code = error or 0
         self.function_code = function_code | 0x80 if error else function_code
         self.information: dict[int, bytes] = {}
@@ -129,7 +141,9 @@ class FakeClient:
         err = self._enter("write_register", address=address, value=value, device_id=device_id)
         if not err:
             self.hr[address] = value
-        return err or await self._reply(FakeResponse(function_code=6))
+        return err or await self._reply(
+            FakeResponse(function_code=6, address=address, registers=[value])
+        )
 
     async def write_registers(self, address, values, *, device_id=1):
         err = self._enter(
@@ -141,13 +155,17 @@ class FakeClient:
         )
         if not err:
             self.hr[address : address + len(values)] = list(values)
-        return err or await self._reply(FakeResponse(function_code=16))
+        return err or await self._reply(
+            FakeResponse(function_code=16, address=address, count=len(values))
+        )
 
     async def write_coil(self, address, value, *, device_id=1):
         err = self._enter("write_coil", address=address, value=value, device_id=device_id)
         if not err:
             self.co[address] = bool(value)
-        return err or await self._reply(FakeResponse(function_code=5))
+        return err or await self._reply(
+            FakeResponse(function_code=5, address=address, bits=[bool(value)])
+        )
 
     async def write_coils(self, address, values, *, device_id=1):
         err = self._enter(
@@ -155,14 +173,18 @@ class FakeClient:
         )
         if not err:
             self.co[address : address + len(values)] = [bool(v) for v in values]
-        return err or await self._reply(FakeResponse(function_code=15))
+        return err or await self._reply(
+            FakeResponse(function_code=15, address=address, count=len(values))
+        )
 
     async def mask_write_register(self, *, address=0, and_mask=0xFFFF, or_mask=0, device_id=1):
         err = self._enter("mask_write_register", address=address, device_id=device_id)
         if not err:
             current = self.hr[address]
             self.hr[address] = (current & and_mask) | (or_mask & ~and_mask & 0xFFFF)
-        return err or await self._reply(FakeResponse(function_code=22))
+        return err or await self._reply(
+            FakeResponse(function_code=22, address=address, and_mask=and_mask, or_mask=or_mask)
+        )
 
     async def _reply(self, response: FakeResponse) -> FakeResponse:
         """A write reached the device and was applied; now the reply may get lost."""
@@ -219,6 +241,7 @@ def make_ctx(client: FakeClient, tags: dict | None = None, **settings: Any) -> F
         modbus_client=client,
         settings=Settings(retry_backoff_base=0.0, **settings),
         tags=parse_tag_map(tags or {}),
+        frames_sent=lambda: len(client.sent),  # like cli.FrameCounter on a real client
     )
     return FakeContext(app)
 

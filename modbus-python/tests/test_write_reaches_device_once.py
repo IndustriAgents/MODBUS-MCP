@@ -30,9 +30,15 @@ def anyio_backend() -> str:
 
 class DropWriteRepliesDevice:
     """Modbus TCP device: answers reads (FC 1, 3), applies writes (FC 5, 6, 15, 16, 22)
-    without replying, and counts every request frame it receives."""
+    and counts every request frame it receives.
 
-    def __init__(self) -> None:
+    `write_reply` says how it answers a write: "drop" (no reply, the default),
+    "echo" (a correct reply), "bad_echo" (a reply whose echoed value is wrong), or
+    a Modbus exception code (the write is then not applied).
+    """
+
+    def __init__(self, write_reply: str | int = "drop") -> None:
+        self.write_reply = write_reply
         self.hr = [0] * 100
         self.co = [False] * 100
         self.received: Counter = Counter()  # (function code, address) -> frames received
@@ -68,6 +74,8 @@ class DropWriteRepliesDevice:
     def _handle(self, fc: int, data: bytes) -> bytes | None:
         address = struct.unpack(">H", data[:2])[0]
         self.received[(fc, address)] += 1
+        if fc in (5, 6, 15, 16, 22) and isinstance(self.write_reply, int):
+            return bytes([fc | 0x80, self.write_reply])  # refused, not applied
         if fc == 3:
             (count,) = struct.unpack(">H", data[2:4])
             regs = self.hr[address : address + count]
@@ -97,7 +105,17 @@ class DropWriteRepliesDevice:
             self.hr[address] = (self.hr[address] & and_mask) | (or_mask & ~and_mask & 0xFFFF)
         else:
             return bytes([fc | 0x80, 1])  # Illegal Function
-        return None
+        if self.write_reply == "drop":
+            return None
+        # A write reply echoes the function code, the address and the value
+        # (FC 5/6), the count (FC 15/16) or the masks (FC 22).
+        echo = bytes([fc]) + data[: 6 if fc == 22 else 4]
+        if self.write_reply == "bad_echo":
+            if fc == 5:  # report the other coil state (pymodbus reads 0xFF01 as ON too)
+                echo = echo[:3] + (b"\x00\x00" if echo[3:5] == b"\xff\x00" else b"\xff\x00")
+            else:  # value, count or mask off by one bit
+                echo = echo[:-1] + bytes([echo[-1] ^ 0x01])
+        return echo
 
 
 async def test_lost_write_replies_with_pymodbus_timeout(tmp_path) -> None:
@@ -160,3 +178,34 @@ async def test_every_write_tool_with_a_tool_timeout(tmp_path) -> None:
             assert device.writes() == {frame: 1 for _, _, frame in calls}
             assert device.hr[1:4] == [7, 8, 9] and device.hr[6] == 3
             assert device.co[3:6] == [True, True, True] and device.co[20] is True
+
+
+async def test_reply_classification_over_the_wire(tmp_path) -> None:
+    """Real pymodbus decoding: a correct echo is "written"; a wrong echo is "unknown"
+    (it may have been applied); a refusing exception is "rejected"; an exception that
+    does not rule a write out is "unknown". Each write reaches the device once."""
+    cases = [
+        ("echo", True, "written"),
+        ("bad_echo", False, "unknown"),
+        (2, False, "rejected"),  # Illegal Data Address
+        (4, False, "unknown"),  # Server Device Failure
+    ]
+    for reply, success, outcome in cases:
+        async with DropWriteRepliesDevice(write_reply=reply) as device:
+            target = SimpleNamespace(host=device.host, port=device.port)
+            async with server(target, tmp_path, MODBUS_WRITES_ENABLED="true") as srv:
+                for tool, arguments, frame in [
+                    ("write_register", {"address": 1, "value": 7}, (6, 1)),
+                    ("write_coil", {"address": 2, "value": True}, (5, 2)),
+                    ("write_registers", {"address": 3, "values": [1, 2]}, (16, 3)),
+                    ("write_coils_bulk", {"address": 4, "values": [True]}, (15, 4)),
+                    ("mask_write_register", {"address": 5, "and_mask": 1, "or_mask": 2}, (22, 5)),
+                ]:
+                    result = await srv.call(tool, **arguments)
+                    label = (reply, tool, result)
+                    assert result["success"] is success, label
+                    assert result["meta"]["outcome"] == outcome, label
+                    assert result["meta"]["request_sent"] is True, label
+                    may = "may have been applied" in (result["error"] or "")
+                    assert may is (outcome == "unknown"), label
+                    assert device.received[frame] == 1, label

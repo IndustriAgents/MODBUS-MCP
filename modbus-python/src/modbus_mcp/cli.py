@@ -50,9 +50,21 @@ WRITE_TOOLS = frozenset(
         "write_tag",
     }
 )
-# meta.outcome of a write: "written" (the device acknowledged it), "rejected"
-# (the device answered with a Modbus exception), "not_sent" (refused before
-# anything was sent), "unknown" (sent, no reply: it may have been applied).
+# meta.outcome of a write: "written" (the device acknowledged it with a reply
+# that echoes the request), "rejected" (the device refused it with an exception
+# that means nothing was done, see REFUSED), "not_sent" (refused before anything
+# was sent), "unknown" (sent, then anything else: no reply, a reply that does not
+# match the request, or an exception that does not rule out a partial or later
+# write; it may have been applied).
+MAY_HAVE_BEEN_APPLIED = "the write may have been applied; check before retrying"
+# Modbus exceptions that mean the device did not act on the request at all:
+# 1 Illegal Function, 2 Illegal Data Address, 3 Illegal Data Value (the
+# request is refused as invalid), 6 Server Device Busy (retransmit later),
+# 10 Gateway Path Unavailable (the gateway could not forward it). The others
+# do not rule a write out: 4 Server Device Failure (failed while performing
+# it), 5 Acknowledge (accepted, still processing), 8 Memory Parity Error,
+# 11 Gateway Target Device Failed to Respond (forwarded, no answer).
+REFUSED = frozenset({1, 2, 3, 6, 10})
 
 # Modbus protocol limits per request (Modbus Application Protocol v1.1b3).
 MAX_READ_REGISTERS = 125
@@ -129,6 +141,25 @@ class AppContext:
     tags: dict[str, Tag] = field(default_factory=dict)
     # Tool calls can run concurrently; only one of them should reconnect.
     reconnect_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # Number of request frames handed to the transport so far (see FrameCounter);
+    # None when unknown. It tells a write that went out from one that did not.
+    frames_sent: Callable[[], int] | None = None
+
+
+class FrameCounter:
+    """pymodbus trace_packet hook: counts frames as they are handed to the transport.
+
+    pymodbus calls trace_packet(True, frame) once the request is fully encoded,
+    immediately before sending it, so an unchanged count means nothing went out.
+    """
+
+    def __init__(self) -> None:
+        self.sent = 0
+
+    def __call__(self, sending: bool, data: bytes) -> bytes:
+        if sending:
+            self.sent += 1
+        return data
 
 
 # -----------------------------
@@ -269,6 +300,13 @@ async def _reconnect(ctx: Context, app: AppContext, op: str) -> bool:
         return True
 
 
+def _sent_since(app: AppContext, frames_before: int | None) -> bool | None:
+    """Was a frame handed to the transport since `frames_before`? None if unknown."""
+    if frames_before is None or app.frames_sent is None:
+        return None
+    return app.frames_sent() != frames_before
+
+
 async def _retry_call(
     ctx: Context,
     app: AppContext,
@@ -313,6 +351,7 @@ async def _retry_call(
         if not getattr(client, "connected", True) and not await _reconnect(ctx, app, op):
             last_err = f"cannot reach device at {settings.target}"
             continue
+        frames_before = app.frames_sent() if app.frames_sent else None
         try:
             result = await _with_timeout(call_factory(), settings.tool_timeout)
             return result, None, elapsed_ms(), attempt
@@ -326,11 +365,18 @@ async def _retry_call(
             await ctx.error(f"{op} failed on attempt {attempt}: {cause}")
             if write:
                 details["cause"] = cause
+                if _sent_since(app, frames_before) is False:  # nothing went out
+                    details["request_sent"] = False
+                    return None, f"the write was not sent: {cause}", elapsed_ms(), attempt
                 return None, WRITE_NO_REPLY, elapsed_ms(), attempt
             last_err = cause
-        except Exception as e:  # unexpected
+        except Exception as e:  # unexpected, e.g. while building or encoding the request
             last_err = f"Unexpected {type(e).__name__}: {e}"
             await ctx.error(f"{op} unexpected error on attempt {attempt}: {last_err}")
+            if write:
+                details["request_sent"] = _sent_since(app, frames_before)
+                if details["request_sent"] is False:
+                    last_err = f"the write was not sent: {last_err}"
             break
     return None, last_err, elapsed_ms(), attempt
 
@@ -343,11 +389,14 @@ async def _request(
     meta: dict,
     *,
     write: bool = False,
+    echo: dict[str, Any] | None = None,
 ) -> tuple[Any, dict[str, Any] | None]:
     """One request with retries. Returns (response, None) or (None, failure envelope).
 
     Adds duration_ms and attempts (and the cause of a failure) to `meta` in place.
-    `write=True` sends the request at most once (see _retry_call).
+    `write=True` sends the request at most once (see _retry_call) and sets
+    meta.outcome/request_sent; a reply that does not match `echo` (the fields
+    a Modbus write reply repeats) is "unknown", not "written".
     """
     details: dict[str, Any] = {}
     result, err, duration_ms, attempts = await _retry_call(
@@ -357,23 +406,49 @@ async def _request(
     if err is not None:
         meta.update(details)
         if write:
+            request_sent = meta.pop("request_sent", None)
             if err == WRITE_NO_REPLY:
                 meta.update(outcome="unknown", request_sent=True)
-            elif err.startswith("cannot reach device"):
+            elif err.startswith("cannot reach device") or request_sent is False:
                 meta.update(outcome="not_sent", request_sent=False)
-            else:  # an unexpected error: whether the request went out is not known
-                meta.update(outcome="unknown", request_sent=None)
-                err += "; the write may have been applied; check before retrying"
+            else:  # it went out, or it is not known whether it did
+                meta.update(outcome="unknown", request_sent=request_sent)
+                err += f"; {MAY_HAVE_BEEN_APPLIED}"
         return None, _make_result(False, error=err, meta=meta)
     if _is_error(result):
         message, extra = _device_error(result)
         meta.update(extra)
         if write:
-            meta.update(outcome="rejected", request_sent=True)
+            if extra.get("exception_code") in REFUSED:
+                meta.update(outcome="rejected", request_sent=True)
+            else:
+                meta.update(outcome="unknown", request_sent=True)
+                message += f"; {MAY_HAVE_BEEN_APPLIED}"
         return None, _make_result(False, error=message, meta=meta)
     if write:
+        mismatch = _echo_mismatch(result, echo or {})
+        if mismatch:
+            meta.update(outcome="unknown", request_sent=True, reply_mismatch=mismatch)
+            error = f"the device's reply does not match the write; {MAY_HAVE_BEEN_APPLIED}"
+            return None, _make_result(False, error=error, meta=meta)
         meta.update(outcome="written", request_sent=True)
     return result, None
+
+
+def _echo_mismatch(response: Any, expected: dict[str, Any]) -> dict[str, Any]:
+    """Fields of a write reply that do not echo the request (Modbus write replies do).
+
+    `expected` maps response attributes to values; for the lists `registers` and
+    `bits` only the leading elements are compared.
+    """
+    mismatch: dict[str, Any] = {}
+    for name, want in expected.items():
+        got = getattr(response, name, None)
+        if isinstance(want, list):
+            got = list(got)[: len(want)] if isinstance(got, (list, tuple)) else got
+        if got != want:
+            mismatch[name] = {"expected": want, "got": got}
+    return mismatch
 
 
 async def _chunked_read(
@@ -466,14 +541,17 @@ def _apply_scale(values: list[Any], scale: float, offset: float) -> list[Any]:
     return [_json_number(v) for v in values]
 
 
-def _make_client(settings: Settings) -> Any:
+def _make_client(settings: Settings, trace_packet: Callable[[bool, bytes], bytes] | None = None):
     # retries=0: on a timeout, pymodbus (3.9-3.15, default retries=3) sends the
     # same request again, which would repeat a write. Reads are retried by
     # _retry_call instead (MODBUS_MAX_RETRIES); writes are never re-sent.
+    common: dict[str, Any] = {"retries": 0}
+    if trace_packet is not None:
+        common["trace_packet"] = trace_packet
     if settings.modbus_type == "tcp":
-        return AsyncModbusTcpClient(host=settings.host, port=settings.port, retries=0)
+        return AsyncModbusTcpClient(host=settings.host, port=settings.port, **common)
     if settings.modbus_type == "udp":
-        return AsyncModbusUdpClient(host=settings.host, port=settings.port, retries=0)
+        return AsyncModbusUdpClient(host=settings.host, port=settings.port, **common)
     return AsyncModbusSerialClient(
         port=settings.serial_port,
         baudrate=settings.baudrate,
@@ -481,7 +559,7 @@ def _make_client(settings: Settings) -> Any:
         stopbits=settings.stopbits,
         bytesize=settings.bytesize,
         timeout=settings.serial_timeout,
-        retries=0,
+        **common,
     )
 
 
@@ -494,7 +572,8 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     at ..."; every call tries to connect again (see _retry_call/_reconnect).
     """
     settings, tags = _config if _config is not None else load_config()
-    client = _make_client(settings)
+    frames = FrameCounter()
+    client = _make_client(settings, frames)
     try:
         await client.connect()
     except Exception as exc:  # e.g. a serial port that cannot be opened
@@ -508,7 +587,9 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
             settings.target,
         )
     try:
-        yield AppContext(modbus_client=client, settings=settings, tags=tags)
+        yield AppContext(
+            modbus_client=client, settings=settings, tags=tags, frames_sent=lambda: frames.sent
+        )
     finally:
         client.close()
 
@@ -617,9 +698,11 @@ async def write_register(
 
     Only works when MODBUS_WRITES_ENABLED=true; otherwise nothing is sent and
     success is false. The write is sent at most once. meta.outcome says what
-    happened: written, rejected (the device answered with an exception),
-    not_sent, or unknown (no reply: it may have been applied, so check before
-    retrying); meta.request_sent says whether the request went out.
+    happened: written (acknowledged), rejected (refused with an exception that
+    means nothing was done), not_sent, or unknown (no reply, a reply that does
+    not match, or an exception that does not rule a write out: it may have been
+    applied, so check before retrying); meta.request_sent says whether the
+    request went out.
     """
     app = _app(ctx)
     slave_id = _slave(app, slave_id)
@@ -634,7 +717,8 @@ async def write_register(
         return await client.write_register(address=address, value=value, **_unit(client, slave_id))
 
     op = f"write_register addr={address} value={value} slave={slave_id}"
-    _, failure = await _request(ctx, app, op, _call, meta, write=True)
+    echo = {"function_code": 6, "address": address, "registers": [value]}
+    _, failure = await _request(ctx, app, op, _call, meta, write=True, echo=echo)
     if failure:
         return failure
     await ctx.info(f"Wrote {value} to register {address} on slave {slave_id}")
@@ -680,9 +764,11 @@ async def write_coil(
 
     Only works when MODBUS_WRITES_ENABLED=true; otherwise nothing is sent and
     success is false. The write is sent at most once. meta.outcome says what
-    happened: written, rejected (the device answered with an exception),
-    not_sent, or unknown (no reply: it may have been applied, so check before
-    retrying); meta.request_sent says whether the request went out.
+    happened: written (acknowledged), rejected (refused with an exception that
+    means nothing was done), not_sent, or unknown (no reply, a reply that does
+    not match, or an exception that does not rule a write out: it may have been
+    applied, so check before retrying); meta.request_sent says whether the
+    request went out.
     """
     app = _app(ctx)
     slave_id = _slave(app, slave_id)
@@ -695,7 +781,8 @@ async def write_coil(
         return await client.write_coil(address=address, value=value, **_unit(client, slave_id))
 
     op = f"write_coil addr={address} value={value} slave={slave_id}"
-    _, failure = await _request(ctx, app, op, _call, meta, write=True)
+    echo = {"function_code": 5, "address": address, "bits": [value]}
+    _, failure = await _request(ctx, app, op, _call, meta, write=True, echo=echo)
     if failure:
         return failure
     await ctx.info(f"Wrote {value} to coil {address} on slave {slave_id}")
@@ -852,9 +939,11 @@ async def write_registers(
 
     Only works when MODBUS_WRITES_ENABLED=true; otherwise nothing is sent and
     success is false. The write is sent at most once. meta.outcome says what
-    happened: written, rejected (the device answered with an exception),
-    not_sent, or unknown (no reply: it may have been applied, so check before
-    retrying); meta.request_sent says whether the request went out.
+    happened: written (acknowledged), rejected (refused with an exception that
+    means nothing was done), not_sent, or unknown (no reply, a reply that does
+    not match, or an exception that does not rule a write out: it may have been
+    applied, so check before retrying); meta.request_sent says whether the
+    request went out.
     """
     app = _app(ctx)
     slave_id = _slave(app, slave_id)
@@ -880,7 +969,8 @@ async def write_registers(
         )
 
     op = f"write_registers addr={address} n={len(values)} slave={slave_id}"
-    _, failure = await _request(ctx, app, op, _call, meta, write=True)
+    echo = {"function_code": 16, "address": address, "count": len(values)}
+    _, failure = await _request(ctx, app, op, _call, meta, write=True, echo=echo)
     if failure:
         return failure
     await ctx.info(f"Wrote {len(values)} registers starting at {address} on slave {slave_id}")
@@ -905,9 +995,11 @@ async def write_coils_bulk(
 
     Only works when MODBUS_WRITES_ENABLED=true; otherwise nothing is sent and
     success is false. The write is sent at most once. meta.outcome says what
-    happened: written, rejected (the device answered with an exception),
-    not_sent, or unknown (no reply: it may have been applied, so check before
-    retrying); meta.request_sent says whether the request went out.
+    happened: written (acknowledged), rejected (refused with an exception that
+    means nothing was done), not_sent, or unknown (no reply, a reply that does
+    not match, or an exception that does not rule a write out: it may have been
+    applied, so check before retrying); meta.request_sent says whether the
+    request went out.
     """
     app = _app(ctx)
     slave_id = _slave(app, slave_id)
@@ -925,7 +1017,8 @@ async def write_coils_bulk(
         return await client.write_coils(address=address, values=values, **_unit(client, slave_id))
 
     op = f"write_coils addr={address} n={len(values)} slave={slave_id}"
-    _, failure = await _request(ctx, app, op, _call, meta, write=True)
+    echo = {"function_code": 15, "address": address, "count": len(values)}
+    _, failure = await _request(ctx, app, op, _call, meta, write=True, echo=echo)
     if failure:
         return failure
     await ctx.info(f"Wrote {len(values)} coils starting at {address} on slave {slave_id}")
@@ -945,9 +1038,11 @@ async def mask_write_register(
     The device sets: register = (register AND and_mask) OR (or_mask AND NOT and_mask).
     Only works when MODBUS_WRITES_ENABLED=true; otherwise nothing is sent and
     success is false. The write is sent at most once. meta.outcome says what
-    happened: written, rejected (the device answered with an exception),
-    not_sent, or unknown (no reply: it may have been applied, so check before
-    retrying); meta.request_sent says whether the request went out.
+    happened: written (acknowledged), rejected (refused with an exception that
+    means nothing was done), not_sent, or unknown (no reply, a reply that does
+    not match, or an exception that does not rule a write out: it may have been
+    applied, so check before retrying); meta.request_sent says whether the
+    request went out.
     """
     app = _app(ctx)
     slave_id = _slave(app, slave_id)
@@ -967,7 +1062,13 @@ async def mask_write_register(
         )
 
     op = f"mask_write_register addr={address} and={and_mask} or={or_mask} slave={slave_id}"
-    _, failure = await _request(ctx, app, op, _call, meta, write=True)
+    echo = {
+        "function_code": 22,
+        "address": address,
+        "and_mask": and_mask,
+        "or_mask": or_mask,
+    }
+    _, failure = await _request(ctx, app, op, _call, meta, write=True, echo=echo)
     if failure:
         return failure
     await ctx.info(f"Mask write register {address} on slave {slave_id}")
