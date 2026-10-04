@@ -82,11 +82,23 @@ exception that, by the protocol's definition, comes before execution (1, 2, 3,
 6 or 10), and only `written` when its reply echoes the request. Anything else
 after the write went out, including a garbled or mismatched reply, exception 4
 (Server Device Failure) or the call's deadline (`MODBUS_CALL_TIMEOUT`), is
-`unknown`. Whether a frame went out is known exactly (pymodbus' trace hook), so
-a failure before sending is `not_sent`.
+`unknown`. Whether a frame went out is known exactly (a hook in pymodbus sees
+each frame right before it is handed to the transport, and refuses it when the
+connection is gone), so a failure before sending is `not_sent`.
+
+A reply is only used if it belongs to its request: an exception reply must
+carry the request's function code, a write reply must echo the request (a coil
+write's byte for byte). Modbus RTU replies carry no transaction id, so a late
+reply to an earlier request could otherwise make a later write look
+`rejected`, or be returned as a read. After any request goes unanswered, the
+server closes the connection before another request can use it and reconnects
+on the next call (on a serial line after a quiet period), so late replies are
+dropped.
 
 A write that has not gone out is never sent after its call was abandoned: when
-the client cancels it, when the client disconnects (the server stops every
+the client cancels it (also in the same instant the write is granted its turn:
+the last check reads the cancel scope mcp sets synchronously), when the client
+disconnects (the server stops every
 pending call as soon as stdin closes), or when the call's deadline passes. The
 deadline (`MODBUS_CALL_TIMEOUT`, 30 s by default) starts when the call starts
 and includes time spent queued behind other calls: an MCP client whose own

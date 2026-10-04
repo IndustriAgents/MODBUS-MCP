@@ -19,6 +19,7 @@ It is part of the [IndustriConnect](https://github.com/IndustriAgents/IndustriCo
 - Typed decode/encode: int16/uint16/int32/uint32/float32/int64/uint64/float64 with byteorder/wordorder, scale, offset
 - Tag map: optional JSON map of named points with `list_tags`, `read_tag`, `write_tag`, validated when the server starts
 - Reliability: reads retried with backoff, an overall deadline per tool call (`MODBUS_CALL_TIMEOUT`), automatic chunking of large reads; starts without the device and connects on first use, reconnects after a drop
+- Replies are checked against their request (function code, count, echoed values), and after a request goes unanswered the connection is reset, so a late reply is never taken for another request's (Modbus RTU replies carry no transaction id)
 - Tool annotations: write tools are marked destructive and not idempotent, read tools read-only, so MCP clients do not treat a write as safe to retry
 - Health: `ping` sends a real Modbus request and reports whether the device answered, plus the configuration
 - Structured results: every tool returns `{ success, data, error, meta }`, including for invalid arguments and device exceptions; arguments must be JSON integers and booleans of the right type (no `"5"`, `5.0` or `1` for `true`)
@@ -47,10 +48,10 @@ Each of `modbus-python/` and `modbus-mock-server/` is its own uv project with a 
 
 | Project | Locked | Supported range (in `pyproject.toml`) |
 |---------|--------|----------------------------------------|
-| `modbus-python` | `mcp` 1.30.0, `pymodbus` 3.15.0, `python-dotenv` 1.2.4, `pyserial` 3.5 | `mcp>=1.12.3,<2`, `pymodbus[serial]>=3.9.2,<3.16`, `python-dotenv>=1.1.0` |
+| `modbus-python` | `mcp` 1.30.0, `pymodbus` 3.15.0, `python-dotenv` 1.2.4, `pyserial` 3.5, `anyio` 4.15.1, `pydantic` 2.13.5 | `mcp>=1.12.3,<2`, `pymodbus[serial]>=3.9.2,<3.16`, `python-dotenv>=1.1.0`, `anyio>=4.5`, `pydantic>=2.8.0,<3` |
 | `modbus-mock-server` | `pymodbus` 3.12.1 | `pymodbus>=3.11.1,<3.13` |
 
-The ranges are what the test suite passes on: the server's full suite (unit tests plus the stdio and mock integration tests) passed with the latest patch release of every pymodbus minor from 3.9 to 3.15 (3.9.2, 3.10.0, 3.11.4, 3.12.1, 3.13.1, 3.14.0, 3.15.0) and with mcp 1.12.3, 1.16.0, 1.20.0, 1.25.0 and 1.30.0. CI runs it on the lockfile and on the lowest version of every direct dependency (`uv pip install --resolution lowest-direct`: mcp 1.12.3, pymodbus 3.9.2, python-dotenv 1.1.0, pyserial 3.5). Up to mcp 1.12.2, a client cancelling a call (`notifications/cancelled`) left the server unable to answer any later request, so 1.12.3 is the floor; `mcp` 2.x removed the `mcp.server.fastmcp` module this server is built on. The mock's limits are explained in its [Known issues](modbus-mock-server/README.md#known-issues).
+The ranges are what the test suite passes on: the server's full suite (unit tests plus the stdio and mock integration tests) passed with the latest patch release of every pymodbus minor from 3.9 to 3.15 (3.9.2, 3.10.0, 3.11.4, 3.12.1, 3.13.1, 3.14.0, 3.15.0) and with mcp 1.12.3, 1.16.0, 1.20.0, 1.25.0 and 1.30.0. CI runs it on the lockfile and on the lowest version of every direct dependency (`uv pip install --resolution lowest-direct` with anyio pinned to its floor: mcp 1.12.3, pymodbus 3.9.2, python-dotenv 1.1.0, pyserial 3.5, anyio 4.5.0, pydantic 2.8.0). Up to mcp 1.12.2, a client cancelling a call (`notifications/cancelled`) left the server unable to answer any later request, so 1.12.3 is the floor; `mcp` 2.x removed the `mcp.server.fastmcp` module this server is built on. The mock's limits are explained in its [Known issues](modbus-mock-server/README.md#known-issues).
 
 ## Quick Start (Local)
 
@@ -82,7 +83,7 @@ npx @modelcontextprotocol/inspector \
 
 This starts the server read-only. To try the write tools against the mock, add `-e MODBUS_WRITES_ENABLED=true`. Or add the server to Claude Desktop as shown [below](#claude-desktop).
 
-The server starts even when the device cannot be reached: `initialize` and `tools/list` work, and the device tools return `success: false` with `"cannot reach device at <host>:<port>"` until it answers. Every call tries to connect, so the mock can be started before or after the server, and a dropped connection is re-established the same way.
+The server starts even when the device cannot be reached (it waits at most 1 s for it at startup): `initialize` and `tools/list` work, and the device tools return `success: false` with `"cannot reach device at <host>:<port>"` until it answers. Every call tries to connect, so the mock can be started before or after the server, and a dropped connection is re-established the same way.
 
 ## MCP Client Examples
 
@@ -120,7 +121,7 @@ The write tools also say what happened to the write, in `meta.outcome` and `meta
 
 A write is sent at most once. Read the value back before writing again after an `unknown`.
 
-A write that has not gone out yet is never sent once nobody wants it any more: when the client cancels the call (`notifications/cancelled`), when the client disconnects (stdin closes; the server then stops every pending call and exits), or when the call's deadline passes. A last check runs right before each request is handed to the transport. Such a write is `not_sent`.
+A write that has not gone out yet is never sent once nobody wants it any more: when the client cancels the call (`notifications/cancelled`, even if it lands in the same instant the write gets its turn), when the client disconnects (stdin closes; the server then stops every pending call and exits), or when the call's deadline passes. A last check runs right before each request is handed to the transport. Such a write is `not_sent`; a call the client cancelled gets the SDK's "Request cancelled" reply and no second one.
 
 | Kind | Tools |
 |------|-------|

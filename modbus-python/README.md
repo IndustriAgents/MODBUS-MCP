@@ -20,7 +20,8 @@ The MCP server of [MODBUS-MCP](../README.md). It is a [uv](https://docs.astral.s
 - **Reliability**:
   - Reads are retried with exponential backoff (`MODBUS_MAX_RETRIES`); per-tool timeouts; automatic chunking of reads to protocol limits (125 registers, 2000 bits per request).
   - Writes are sent at most once. pymodbus' own re-sending is switched off (`retries=0`), and a write is only retried when nothing was sent (the connection could not be opened). If a write went out and no reply came back, the tool returns `success: false`, `"no reply; the write may have been applied; check before retrying"`.
-  - Starts without the device: `initialize` and `tools/list` work, device tools return `"cannot reach device at …"` until it answers, and every call tries to connect (also after a dropped connection).
+  - Starts without the device (waiting at most 1 s for it): `initialize` and `tools/list` work, device tools return `"cannot reach device at …"` until it answers, and every call tries to connect (also after a dropped connection).
+  - Every reply is checked against its request: an exception reply must carry the request's function code, a read reply the function code and exact count, a write reply the echoed address and value/count/masks (a coil write's reply byte for byte, since pymodbus decodes any non-zero value as ON). A reply that does not belong is not used (a read is retried, a write is `unknown`). After a request goes unanswered, the connection is closed in the same step, before another request can use it, and the next call reconnects (on a serial line after a quiet period of `MODBUS_TIMEOUT`), so a late reply is never taken for the next request's. Modbus RTU replies carry no transaction id, and pymodbus before 3.12 does not check TCP's.
 - **Validation**:
   - Arguments are checked against Modbus limits before anything is sent (addresses and register values 0-65535, unit ids 0-255, at most 123 registers or 1968 coils per write, known dtypes and byte/word orders). Integers and booleans are strict: `"5"`, `5.0` or `true` is not an address, and `1` or `"on"` is not a coil state. Typed values the dtype cannot hold exactly (out of range, a fraction for an integer type) are refused rather than truncated.
 - **Structured results**:
@@ -66,7 +67,7 @@ The server connects to a Modbus device using parameters specified via environmen
 
 The configuration is checked when it is read. An invalid value (a port that is not a number, an unknown `MODBUS_TYPE`, `MODBUS_WRITES_ENABLED=maybe`, a tag map that does not exist or does not validate) stops the server with exit status 2 and a `modbus-mcp: configuration error: …` message on stderr. An empty value means the default.
 
-`modbus-mcp` is a stdio server, meant to be launched by an MCP client (see [Installing for Claude Desktop](#installing-for-claude-desktop), or the MCP Inspector command in [CONTRIBUTING.md](../CONTRIBUTING.md#testing-a-change)). Run by hand in a terminal, it prints nothing and waits for JSON-RPC on stdin; nothing but JSON-RPC is ever written to stdout. It tries to connect to the device at startup, but starts either way: if the device is unreachable it logs `Cannot reach Modbus <type> device at <address> yet` on stderr, and the device tools return `success: false`, `"cannot reach device at <address>"` until the device answers. Every tool call tries to connect first, which also re-establishes a dropped connection. `modbus-mcp --help` lists the command-line options.
+`modbus-mcp` is a stdio server, meant to be launched by an MCP client (see [Installing for Claude Desktop](#installing-for-claude-desktop), or the MCP Inspector command in [CONTRIBUTING.md](../CONTRIBUTING.md#testing-a-change)). Run by hand in a terminal, it prints nothing and waits for JSON-RPC on stdin; nothing but JSON-RPC is ever written to stdout. It tries to connect to the device at startup, for at most 1 s, but starts either way: if the device is unreachable it logs `Cannot reach Modbus <type> device at <address> yet` on stderr, and the device tools return `success: false`, `"cannot reach device at <address>"` until the device answers. Every tool call tries to connect first, which also re-establishes a dropped connection. `modbus-mcp --help` lists the command-line options.
 
 ### Environment Variables
 
@@ -145,12 +146,14 @@ The write tools add `meta.outcome` and `meta.request_sent`:
 
 - `written`: the device acknowledged the write with a reply that echoes it (function code, address, and value, count or masks);
 - `rejected`: the device refused it with a Modbus exception that comes before execution by the protocol's definition: 1, 2, 3, 6 or 10;
-- `not_sent` (`request_sent: false`): refused before sending, because writes are disabled, the arguments are invalid, the device is unreachable, or encoding failed locally; whether a frame went out is known exactly, from pymodbus' `trace_packet` hook;
-- `unknown` (`request_sent: true`): it went out, and then there was no reply (`"no reply; the write may have been applied; check before retrying"`), a reply that does not echo the request (`meta.reply_mismatch`), another exception (4 Server Device Failure, 5 Acknowledge, 8, 11), or the call's deadline passed.
+- `not_sent` (`request_sent: false`): refused before sending, because writes are disabled, the arguments are invalid, the device is unreachable, or encoding failed locally; whether a frame went out is known exactly, from pymodbus' `trace_packet` hook, which sees each frame right before it is handed to the transport (and refuses it when the connection is gone, since pymodbus would drop it silently);
+- `unknown` (`request_sent: true`): it went out, and then there was no reply (`"no reply; the write may have been applied; check before retrying"`), a reply that does not belong to it (another request's, or one that does not echo it: `meta.reply_mismatch`), another exception (4 Server Device Failure, 5 Acknowledge, 8, 11), or the call's deadline passed.
 
 Nothing is sent twice, so read the value back before writing again after an `unknown`.
 
-A write that has not gone out is never sent after the call was abandoned: the client cancelled it (`notifications/cancelled`), the client disconnected (stdin closed; pending calls are stopped and the server exits with status 0), or the call's deadline passed. `SendGate`, the last check right before pymodbus hands a request to the transport, refuses it; the result is `not_sent`. The examples use addresses that exist on the [mock device](../modbus-mock-server/README.md#register-map-unitslave-id-any) (every table holds addresses 0-99; 10-99 are unused, free for experiments); the writes need `MODBUS_WRITES_ENABLED=true`.
+A write that has not gone out is never sent after the call was abandoned: the client cancelled it (`notifications/cancelled`), the client disconnected (stdin closed; pending calls are stopped and the server exits with status 0), or the call's deadline passed. `SendGate`, the last check right before pymodbus hands a request to the transport, refuses it; the result is `not_sent`. A cancellation that lands in the same instant the write gets its turn is caught too: the gate reads mcp's cancel scope for the request, which the SDK sets before the call can notice. A call the client cancelled ends without a second reply (the SDK has already answered "Request cancelled").
+
+The examples use addresses that exist on the [mock device](../modbus-mock-server/README.md#register-map-unitslave-id-any) (every table holds addresses 0-99; 10-99 are unused, free for experiments); the writes need `MODBUS_WRITES_ENABLED=true`.
 
 1. Read one holding register (Valve Position on the mock)
    ```json
@@ -292,7 +295,10 @@ The integration tests (`-m integration`) start the mock device from `../modbus-m
 
 ## Known issues
 
-- **A malformed coil echo can pass as ON.** pymodbus decodes any non-zero value in a write_coil reply as ON, so a device that echoes ON as something other than `0xFF00` is still reported `written`. An echo of the other state is caught (`unknown`).
+None at the moment. Behaviour worth knowing:
+
+- On a serial line, a request that gets no reply within `MODBUS_TIMEOUT` makes the server close the port and reopen it after another `MODBUS_TIMEOUT`, so the next call takes up to twice that longer. That is the price of never mistaking a late reply for the next request's.
+- The cancel check reads mcp's private `session._in_flight` / `RequestResponder._cancel_scope` (pinned by `mcp<2` and by `tests/test_cancel_race.py`).
 
 ## Testing, Security and Contributing
 

@@ -72,7 +72,7 @@ connect, so the mock can come up before or after the server.
 Both projects commit `uv.lock`, and `uv sync` installs exactly what it pins.
 The ranges in the two `pyproject.toml` files are the versions the tests pass
 on: the server takes `mcp>=1.12.3,<2`, `pymodbus[serial]>=3.9.2,<3.16` and
-`python-dotenv>=1.1.0`, the mock `pymodbus>=3.11.1,<3.13` (see their READMEs
+`python-dotenv>=1.1.0`, `anyio>=4.5` and `pydantic>=2.8.0,<3`, the mock `pymodbus>=3.11.1,<3.13` (see their READMEs
 for why). CI runs the server's tests on the locked versions and again with
 `uv pip install --resolution lowest-direct`, i.e. the lowest version of every
 direct dependency, and starts the mock on its lowest pymodbus. If you change a
@@ -151,7 +151,13 @@ you used.
   through `_retry_call` so they respect it. A call that is cancelled, or
   pending when the client disconnects, must never send afterwards: requests
   go out through the pymodbus client whose `trace_packet` is `SendGate`, which
-  checks that right before the send. Write tools are annotated
+  checks that right before the send (including mcp's cancel scope for the
+  request). A call the client cancelled must end as a cancellation, never with
+  a second reply.
+- Every request passes a `reply_check` (function code, count, echo) to
+  `_request`/`_retry_call`/`_chunked_read`; a reply that does not belong to
+  its request is never used, and an unanswered request resets the connection
+  (`_desync`). Write tools are annotated
   destructive and not idempotent (`DEVICE_WRITE`), the others `READ_ONLY`.
 - Test mocks are started with `start_mock()` in `tests/conftest.py`, which
   runs them with `--exit-on-stdin-eof` so a killed test run leaves no orphans.
