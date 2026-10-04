@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import anyio
+import anyio.lowlevel
 from dotenv import dotenv_values
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
@@ -195,7 +196,8 @@ class SendGate:
     synchronously and immediately before handing it to the transport: there is
     no await between this check and the send. It refuses the send (raising
     RequestNotSent, so nothing is written) when the MCP client has disconnected,
-    the tool call was cancelled, or its deadline has passed; a request that was
+    the tool call was cancelled (also by notifications/cancelled that arrived in
+    the same event-loop step), or its deadline has passed; a request that was
     queued, reconnecting or waiting then is never sent later. It also refuses
     (NotConnected) when the connection has been closed, since pymodbus would
     otherwise drop the frame silently. Otherwise it counts the frame, so an
@@ -468,6 +470,11 @@ class _CallState:
     seconds: float
     cancelled: bool = False  # it ended without a result: nothing of it may be sent
     frames: int = 0  # requests of THIS call handed to the transport (counted by SendGate)
+    # The cancel scope mcp opened for this request. notifications/cancelled cancels it
+    # synchronously; the task running the call may still take one more step (anyio
+    # does not interrupt a task whose wait has already completed, e.g. that was just
+    # granted pymodbus' lock), so SendGate checks it before every send.
+    request_scope: Any = None
 
     @property
     def sent(self) -> bool:
@@ -502,6 +509,8 @@ def _abandoned(closing: bool) -> str | None:
     if state is None:
         return None
     if state.cancelled:
+        return "the call was cancelled"
+    if getattr(state.request_scope, "cancel_called", False):
         return "the call was cancelled"
     return None
 
@@ -1012,6 +1021,22 @@ class ModbusMCP(FastMCP):
         except Exception:
             return Settings().call_timeout
 
+    def _request_cancel_scope(self) -> Any:
+        """The cancel scope mcp opened for the current request, or None.
+
+        mcp's RequestResponder.cancel() (notifications/cancelled) cancels this scope
+        synchronously, before the running call notices; SendGate reads its
+        cancel_called. Private mcp<2 internals (session._in_flight,
+        RequestResponder._cancel_scope); tests/test_cancel_race.py fails if they move.
+        """
+        try:
+            context = self._mcp_server.request_context
+        except LookupError:
+            return None
+        in_flight = getattr(context.session, "_in_flight", None)
+        responder = in_flight.get(context.request_id) if isinstance(in_flight, dict) else None
+        return getattr(responder, "_cancel_scope", None)
+
     def client_disconnected(self) -> None:
         """The client is gone: send nothing more, and cancel every call in progress."""
         if self.client_gone:
@@ -1069,7 +1094,16 @@ class ModbusMCP(FastMCP):
         if tool is None:
             return await super().call_tool(name, arguments)  # FastMCP: unknown tool
         state = _CallState.start(self._call_timeout())
+        state.request_scope = self._request_cancel_scope()
         result = await self._run_call(tool, name, arguments, state)
+        if getattr(state.request_scope, "cancel_called", False):
+            # The client cancelled this request (notifications/cancelled) and mcp has
+            # already answered "Request cancelled": a second reply would trip the SDK
+            # ("Request already responded to"). End as the cancellation it is.
+            what = "a request had already been sent" if state.sent else "nothing was sent"
+            log.info("%s was cancelled by the client; %s", name, what)
+            await anyio.lowlevel.checkpoint_if_cancelled()
+            raise anyio.get_cancelled_exc_class()()
         return result
 
     async def _run_call(
