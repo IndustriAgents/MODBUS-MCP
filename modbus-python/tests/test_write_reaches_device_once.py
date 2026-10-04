@@ -110,6 +110,8 @@ async def test_lost_write_replies_with_pymodbus_timeout(tmp_path) -> None:
             assert result["success"] is False
             assert result["error"] == WRITE_NO_REPLY
             assert result["meta"]["attempts"] == 1
+            assert result["meta"]["outcome"] == "unknown"
+            assert result["meta"]["request_sent"] is True
             result = await srv.call("write_coils_bulk", address=10, values=[True, False, True])
             assert result["error"] == WRITE_NO_REPLY
 
@@ -153,6 +155,8 @@ async def test_every_write_tool_with_a_tool_timeout(tmp_path) -> None:
                 result = await srv.call(tool, **arguments)
                 assert result["success"] is False, (tool, result)
                 assert result["error"] == WRITE_NO_REPLY, (tool, result)
+                assert result["meta"]["outcome"] == "unknown", (tool, result)
+                assert result["meta"]["request_sent"] is True, (tool, result)
             assert device.writes() == {frame: 1 for _, _, frame in calls}
             assert device.hr[1:4] == [7, 8, 9] and device.hr[6] == 3
             assert device.co[3:6] == [True, True, True] and device.co[20] is True

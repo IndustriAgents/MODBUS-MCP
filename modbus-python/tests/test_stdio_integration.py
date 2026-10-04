@@ -126,7 +126,13 @@ async def test_writes_are_refused_by_default(mock, tmp_path) -> None:
             "success": False,
             "data": None,
             "error": WRITES_DISABLED,
-            "meta": {"address": 20, "value": 1234, "slave_id": 1},
+            "meta": {
+                "address": 20,
+                "value": 1234,
+                "slave_id": 1,
+                "outcome": "not_sent",
+                "request_sent": False,
+            },
         }
         after = await srv.call("read_register", address=20)
         assert after["data"] == before["data"]
@@ -161,7 +167,9 @@ async def test_writes_and_typed_values_when_enabled(mock, tmp_path) -> None:
     async with server(
         mock, tmp_path, MODBUS_WRITES_ENABLED="true", REGISTER_MAP_FILE=str(tags)
     ) as srv:
-        assert (await srv.call("write_register", address=20, value=1234))["success"]
+        written = await srv.call("write_register", address=20, value=1234)
+        assert written["success"]
+        assert written["meta"]["outcome"] == "written" and written["meta"]["request_sent"]
         assert (await srv.call("read_register", address=20))["data"] == {"value": 1234}
         assert (await srv.call("write_registers", address=21, values=[1, 2, 3]))["success"]
         regs = await srv.call("read_multiple_holding_registers", address=20, count=4)

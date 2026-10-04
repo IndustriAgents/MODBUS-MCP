@@ -68,7 +68,10 @@ def test_invalid_arguments_return_an_envelope(tool: str, arguments: dict, fragme
     assert envelope["data"] is None
     assert envelope["error"].startswith("Invalid arguments: ")
     assert fragment in envelope["error"]
-    assert envelope["meta"] == {"tool": tool}
+    expected_meta = {"tool": tool}
+    if tool in cli.WRITE_TOOLS:  # nothing was sent
+        expected_meta.update(outcome="not_sent", request_sent=False)
+    assert envelope["meta"] == expected_meta
 
 
 def test_an_exception_inside_a_tool_also_returns_an_envelope() -> None:
@@ -175,6 +178,7 @@ def test_write_tag_rejects_values_it_cannot_write_exactly(client, tag, value, fr
     result = run(cli.write_tag(tag, value, ctx))
     assert result["success"] is False
     assert fragment in result["error"]
+    assert result["meta"]["outcome"] == "not_sent" and result["meta"]["request_sent"] is False
     assert client.calls == []
 
 

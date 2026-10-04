@@ -37,7 +37,20 @@ WRITES_DISABLED = (
     "Writes are disabled by configuration (set MODBUS_WRITES_ENABLED=true to allow them)"
 )
 # A write request went out but no reply came back. It is never sent again.
-WRITE_NO_REPLY = "no reply; the write may have been applied"
+WRITE_NO_REPLY = "no reply; the write may have been applied; check before retrying"
+WRITE_TOOLS = frozenset(
+    {
+        "write_register",
+        "write_registers",
+        "write_coil",
+        "write_coils_bulk",
+        "mask_write_register",
+        "write_tag",
+    }
+)
+# meta.outcome of a write: "written" (the device acknowledged it), "rejected"
+# (the device answered with a Modbus exception), "not_sent" (refused before
+# anything was sent), "unknown" (sent, no reply: it may have been applied).
 
 # Modbus protocol limits per request (Modbus Application Protocol v1.1b3).
 MAX_READ_REGISTERS = 125
@@ -153,6 +166,13 @@ def _make_result(
         "error": error,
         "meta": meta or {},
     }
+
+
+def _not_sent(error: str, meta: dict[str, Any]) -> dict[str, Any]:
+    """A write refused before anything was sent to the device."""
+    return _make_result(
+        False, error=error, meta={**meta, "outcome": "not_sent", "request_sent": False}
+    )
 
 
 def _app(ctx: Context) -> AppContext:
@@ -305,11 +325,23 @@ async def _request(
     meta.update(duration_ms=round(duration_ms, 3), attempts=attempts)
     if err is not None:
         meta.update(details)
+        if write:
+            if err == WRITE_NO_REPLY:
+                meta.update(outcome="unknown", request_sent=True)
+            elif err.startswith("cannot reach device"):
+                meta.update(outcome="not_sent", request_sent=False)
+            else:  # an unexpected error: whether the request went out is not known
+                meta.update(outcome="unknown", request_sent=None)
+                err += "; the write may have been applied; check before retrying"
         return None, _make_result(False, error=err, meta=meta)
     if _is_error(result):
         message, extra = _device_error(result)
         meta.update(extra)
+        if write:
+            meta.update(outcome="rejected", request_sent=True)
         return None, _make_result(False, error=message, meta=meta)
+    if write:
+        meta.update(outcome="written", request_sent=True)
     return result, None
 
 
@@ -483,7 +515,14 @@ class ModbusMCP(FastMCP):
                 error = f"Unexpected {type(cause).__name__}: {cause}"
             else:
                 error = str(exc)
-            envelope = _make_result(False, error=error, meta={"tool": name})
+            meta: dict[str, Any] = {"tool": name}
+            if name in WRITE_TOOLS:
+                if isinstance(cause, ValidationError):
+                    meta.update(outcome="not_sent", request_sent=False)
+                else:  # raised somewhere in the tool: whether a request went out is unknown
+                    meta.update(outcome="unknown", request_sent=None)
+                    error += "; the write may have been applied; check before retrying"
+            envelope = _make_result(False, error=error, meta=meta)
             # mcp >= 1.10 also returns structured content; let the tool's own
             # converter shape the envelope exactly like a normal result.
             convert = getattr(getattr(tool, "fn_metadata", None), "convert_result", None)
@@ -546,15 +585,18 @@ async def write_register(
     """Write one holding register (function 6).
 
     Only works when MODBUS_WRITES_ENABLED=true; otherwise nothing is sent and
-    success is false.
+    success is false. The write is sent at most once. meta.outcome says what
+    happened: written, rejected (the device answered with an exception),
+    not_sent, or unknown (no reply: it may have been applied, so check before
+    retrying); meta.request_sent says whether the request went out.
     """
     app = _app(ctx)
     slave_id = _slave(app, slave_id)
     meta: dict[str, Any] = {"address": address, "value": value, "slave_id": slave_id}
     if not app.settings.writes_enabled:
-        return _make_result(False, error=WRITES_DISABLED, meta=meta)
+        return _not_sent(WRITES_DISABLED, meta=meta)
     if not (0 <= value <= 65535):
-        return _make_result(False, error=f"Value {value} out of uint16 range (0-65535)", meta=meta)
+        return _not_sent(f"Value {value} out of uint16 range (0-65535)", meta=meta)
     client = app.modbus_client
 
     async def _call():
@@ -606,13 +648,16 @@ async def write_coil(
     """Write one coil (function 5).
 
     Only works when MODBUS_WRITES_ENABLED=true; otherwise nothing is sent and
-    success is false.
+    success is false. The write is sent at most once. meta.outcome says what
+    happened: written, rejected (the device answered with an exception),
+    not_sent, or unknown (no reply: it may have been applied, so check before
+    retrying); meta.request_sent says whether the request went out.
     """
     app = _app(ctx)
     slave_id = _slave(app, slave_id)
     meta: dict[str, Any] = {"address": address, "value": value, "slave_id": slave_id}
     if not app.settings.writes_enabled:
-        return _make_result(False, error=WRITES_DISABLED, meta=meta)
+        return _not_sent(WRITES_DISABLED, meta=meta)
     client = app.modbus_client
 
     async def _call():
@@ -762,27 +807,27 @@ async def write_registers(
     """Write consecutive holding registers in one request (function 16).
 
     Only works when MODBUS_WRITES_ENABLED=true; otherwise nothing is sent and
-    success is false.
+    success is false. The write is sent at most once. meta.outcome says what
+    happened: written, rejected (the device answered with an exception),
+    not_sent, or unknown (no reply: it may have been applied, so check before
+    retrying); meta.request_sent says whether the request went out.
     """
     app = _app(ctx)
     slave_id = _slave(app, slave_id)
     meta: dict[str, Any] = {"address": address, "count": len(values), "slave_id": slave_id}
     if not app.settings.writes_enabled:
-        return _make_result(False, error=WRITES_DISABLED, meta=meta)
+        return _not_sent(WRITES_DISABLED, meta=meta)
     if not values or len(values) > MAX_WRITE_REGISTERS:
-        return _make_result(
-            False, error=f"Write 1 to {MAX_WRITE_REGISTERS} registers per request", meta=meta
-        )
+        return _not_sent(f"Write 1 to {MAX_WRITE_REGISTERS} registers per request", meta=meta)
     for i, v in enumerate(values):
         if not (0 <= v <= 65535):
-            return _make_result(
-                False,
-                error=f"Value {v} at index {i} out of uint16 range (0-65535)",
+            return _not_sent(
+                f"Value {v} at index {i} out of uint16 range (0-65535)",
                 meta={**meta, "index": i, "value": v},
             )
     span_error = _span_error(address, len(values))
     if span_error:
-        return _make_result(False, error=span_error, meta=meta)
+        return _not_sent(span_error, meta=meta)
     client = app.modbus_client
 
     async def _call():
@@ -815,20 +860,21 @@ async def write_coils_bulk(
     """Write consecutive coils in one request (function 15).
 
     Only works when MODBUS_WRITES_ENABLED=true; otherwise nothing is sent and
-    success is false.
+    success is false. The write is sent at most once. meta.outcome says what
+    happened: written, rejected (the device answered with an exception),
+    not_sent, or unknown (no reply: it may have been applied, so check before
+    retrying); meta.request_sent says whether the request went out.
     """
     app = _app(ctx)
     slave_id = _slave(app, slave_id)
     meta: dict[str, Any] = {"address": address, "count": len(values), "slave_id": slave_id}
     if not app.settings.writes_enabled:
-        return _make_result(False, error=WRITES_DISABLED, meta=meta)
+        return _not_sent(WRITES_DISABLED, meta=meta)
     if not values or len(values) > MAX_WRITE_COILS:
-        return _make_result(
-            False, error=f"Write 1 to {MAX_WRITE_COILS} coils per request", meta=meta
-        )
+        return _not_sent(f"Write 1 to {MAX_WRITE_COILS} coils per request", meta=meta)
     span_error = _span_error(address, len(values))
     if span_error:
-        return _make_result(False, error=span_error, meta=meta)
+        return _not_sent(span_error, meta=meta)
     client = app.modbus_client
 
     async def _call():
@@ -854,7 +900,10 @@ async def mask_write_register(
 
     The device sets: register = (register AND and_mask) OR (or_mask AND NOT and_mask).
     Only works when MODBUS_WRITES_ENABLED=true; otherwise nothing is sent and
-    success is false.
+    success is false. The write is sent at most once. meta.outcome says what
+    happened: written, rejected (the device answered with an exception),
+    not_sent, or unknown (no reply: it may have been applied, so check before
+    retrying); meta.request_sent says whether the request went out.
     """
     app = _app(ctx)
     slave_id = _slave(app, slave_id)
@@ -865,7 +914,7 @@ async def mask_write_register(
         "slave_id": slave_id,
     }
     if not app.settings.writes_enabled:
-        return _make_result(False, error=WRITES_DISABLED, meta=meta)
+        return _not_sent(WRITES_DISABLED, meta=meta)
     client = app.modbus_client
 
     async def _call():
@@ -1109,38 +1158,38 @@ async def write_tag(
     scale and offset are reversed, then the value is encoded with its dtype
     (default uint16) and byte/word order. Input and discrete-input tags are
     read-only. Only works when MODBUS_WRITES_ENABLED=true; otherwise nothing is
-    sent and success is false.
+    sent and success is false. meta.outcome and meta.request_sent work as in
+    write_register.
     """
     app = _app(ctx)
     meta: dict[str, Any] = {"tag": name}
     if not app.settings.writes_enabled:
-        return _make_result(False, error=WRITES_DISABLED, meta=meta)
+        return _not_sent(WRITES_DISABLED, meta=meta)
     tag = app.tags.get(name)
     if tag is None:
-        return _unknown_tag(name)
+        return _not_sent(_unknown_tag(name)["error"], meta)
     if not tag.writable:
-        return _make_result(False, error=f"Tag {name!r} is read-only ({tag.table})", meta=meta)
+        return _not_sent(f"Tag {name!r} is read-only ({tag.table})", meta=meta)
     if tag.table == "coil":
         if tag.count != 1:
             error = f"Tag {name!r} covers {tag.count} coils; write them with write_coils_bulk"
-            return _make_result(False, error=error, meta=meta)
+            return _not_sent(error, meta=meta)
         if not (isinstance(value, bool) or (isinstance(value, int) and value in (0, 1))):
-            return _make_result(
-                False, error=f"Coil tag {name!r} takes true or false, got {value!r}", meta=meta
-            )
-        return await write_coil(tag.address, bool(value), ctx, tag.slave_id)
+            return _not_sent(f"Coil tag {name!r} takes true or false, got {value!r}", meta=meta)
+        result = await write_coil(tag.address, bool(value), ctx, tag.slave_id)
+        result["meta"]["tag"] = name
+        return result
     vals = value if isinstance(value, list) else [value]
     if len(vals) != tag.count:
-        return _make_result(
-            False,
-            error=f"Tag {name!r} holds {tag.count} value(s); got {len(vals)}",
+        return _not_sent(
+            f"Tag {name!r} holds {tag.count} value(s); got {len(vals)}",
             meta=meta,
         )
     try:
         raw = _unscale(vals, tag)
         regs = codec.encode(raw, tag.dtype or "uint16", tag.byteorder, tag.wordorder)
     except codec.CodecError as e:
-        return _make_result(False, error=f"Tag {name!r}: {e}", meta=meta)
+        return _not_sent(f"Tag {name!r}: {e}", meta=meta)
     result = await write_registers(tag.address, regs, ctx, tag.slave_id)
     result["meta"].update(tag=name, raw_values=raw)
     return result

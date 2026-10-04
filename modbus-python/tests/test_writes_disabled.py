@@ -30,6 +30,7 @@ def test_writes_are_refused_by_default(client, name: str) -> None:
     assert result["success"] is False
     assert result["error"] == cli.WRITES_DISABLED
     assert "MODBUS_WRITES_ENABLED=true" in result["error"]
+    assert result["meta"]["outcome"] == "not_sent" and result["meta"]["request_sent"] is False
     assert client.calls == []  # nothing reached the device
 
 
@@ -38,6 +39,7 @@ def test_writes_go_through_when_enabled(client, name: str) -> None:
     ctx = make_ctx(client, TAGS, writes_enabled=True)
     result = run(WRITE_CALLS[name](ctx))
     assert result["success"] is True, result
+    assert result["meta"]["outcome"] == "written" and result["meta"]["request_sent"] is True
     assert client.writes
 
 

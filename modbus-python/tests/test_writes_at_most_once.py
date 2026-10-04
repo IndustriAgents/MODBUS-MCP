@@ -38,7 +38,9 @@ def test_a_write_whose_reply_is_lost_is_sent_once(client, name: str) -> None:
     ctx = make_ctx(client, TAGS, writes_enabled=True, max_retries=5)
     result = run(WRITE_CALLS[name](ctx))
     assert result["success"] is False
-    assert result["error"] == cli.WRITE_NO_REPLY == "no reply; the write may have been applied"
+    assert result["error"] == cli.WRITE_NO_REPLY
+    assert result["error"] == "no reply; the write may have been applied; check before retrying"
+    assert result["meta"]["outcome"] == "unknown" and result["meta"]["request_sent"] is True
     assert "ModbusIOException" in result["meta"]["cause"]
     assert result["meta"]["attempts"] == 1
     assert len(client.sent_writes) == 1, client.sent
@@ -72,6 +74,7 @@ def test_a_write_that_was_not_sent_is_retried_after_reconnecting(client) -> None
     result = run(cli.write_register(1, 50, ctx))
     assert result["success"], result
     assert result["meta"]["attempts"] == 2
+    assert result["meta"]["outcome"] == "written" and result["meta"]["request_sent"] is True
     assert client.connect_calls == 1
     assert client.sent_writes == ["write_register"]
     assert client.hr[1] == 50
@@ -88,6 +91,22 @@ def test_an_unreachable_device_gets_no_write(client) -> None:
     result = run(cli.write_register(1, 50, ctx))
     assert result["success"] is False
     assert result["error"] == "cannot reach device at 127.0.0.1:502"
+    assert result["meta"]["outcome"] == "not_sent" and result["meta"]["request_sent"] is False
+    assert client.calls == []
+
+
+def test_a_write_the_device_rejects(client) -> None:
+    ctx = make_ctx(client, writes_enabled=True)
+    result = run(cli.write_register(150, 1, ctx))  # the fake device has 100 registers
+    assert result["error"].startswith("Modbus exception 2 (Illegal Data Address)")
+    assert result["meta"]["outcome"] == "rejected" and result["meta"]["request_sent"] is True
+
+
+def test_a_write_refused_by_the_server_is_not_sent(client) -> None:
+    ctx = make_ctx(client, writes_enabled=True)
+    result = run(cli.write_registers(65535, [1, 2], ctx))  # runs past the address space
+    assert "runs past" in result["error"]
+    assert result["meta"]["outcome"] == "not_sent" and result["meta"]["request_sent"] is False
     assert client.calls == []
 
 
