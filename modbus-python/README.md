@@ -4,33 +4,34 @@ The MCP server of [MODBUS-MCP](../README.md). It is a [uv](https://docs.astral.s
 
 ## Features
 
+- **Read-only by default**: the write tools (`write_register`, `write_registers`, `write_coil`, `write_coils_bulk`, `mask_write_register`, `write_tag`) send nothing unless `MODBUS_WRITES_ENABLED=true`.
 - **Core tools**:
-  - Read/write holding registers: `read_register`, `write_register`, `read_multiple_holding_registers`.
+  - Read/write holding registers: `read_register`, `write_register`, `read_multiple_holding_registers`, `write_registers`.
   - Read/write coils: `read_coils`, `write_coil`, `write_coils_bulk`.
   - Read input registers: `read_input_registers`.
   - Read discrete inputs: `read_discrete_inputs`.
   - Bitwise masked write: `mask_write_register`.
   - Device information (MEI 0x2B/0x0E): `read_device_information`.
-- **Typed reads/writes** (currently broken, see [Known issues](#known-issues)):
+- **Typed reads**:
   - `read_holding_typed`, `read_input_typed` for `int16/uint16/int32/uint32/int64/uint64/float32/float64` with byte/word endianness, scale, and offset.
-  - Encode/Decode uses pymodbus BinaryPayload utilities.
+  - Encoding and decoding are done in `src/modbus_mcp/codec.py` with the same register layout pymodbus' former `BinaryPayloadBuilder`/`Decoder` used (a test checks this against them on pymodbus 3.9).
 - **Tag map (optional)**:
-  - Load JSON register map via `REGISTER_MAP_FILE` and use `list_tags`, `read_tag`, `write_tag` (typed tags and holding-register writes are affected by the same [known issue](#known-issues)).
+  - Load a JSON register map via `REGISTER_MAP_FILE` and use `list_tags`, `read_tag`, `write_tag`. Typed tags are decoded and scaled on read; `write_tag` takes the same engineering units and reverses the scale and offset.
 - **Reliability**:
-  - Built-in retries with exponential backoff, per-tool timeouts, and automatic chunking to protocol limits.
+  - Retries with exponential backoff, per-tool timeouts, and automatic chunking of reads to protocol limits (125 registers, 2000 bits per request).
+  - Reconnects by itself when the connection to the device has dropped (for example after the device restarts).
+- **Validation**:
+  - Arguments are checked against Modbus limits before anything is sent (addresses and register values 0-65535, unit ids 0-255, at most 123 registers or 1968 coils per write, known dtypes and byte/word orders). Typed values the dtype cannot hold exactly (out of range, a fraction for an integer type) are refused rather than truncated.
 - **Structured results**:
-  - Every tool returns `{ success, data, error, meta }` for predictable parsing.
+  - Every tool returns `{ success, data, error, meta }` for predictable parsing, including invalid arguments (`"error": "Invalid arguments: …"`) and device exceptions (`"error": "Modbus exception 2 (Illegal Data Address) for function 0x03"`, `meta.exception_code`).
 - **Health**:
-  - `ping` returns connection and configuration status.
+  - `ping` reads one holding register (address 0 by default) to check that the device answers. Any Modbus reply counts as reachable, including an exception reply; only no reply makes it return `success: false`. It also reports the configuration.
 - **Prompt**:
   - Analyze register values with a simple prompt: `analyze_register`.
 
-> [!WARNING]
-> Typed values currently fail on every call: `read_holding_typed`, `read_input_typed`, `read_tag` on a tag with a `dtype`, and `write_tag` on a holding-register tag return `{"success": false, "error": "Big"}`. See [Known issues](#known-issues).
-
 ## Requirements
 
-- **Python**: 3.10
+- **Python**: 3.10+ (uv uses 3.10 from `.python-version`)
 - **uv** for dependency and virtual environment management.
 
 ## Installation
@@ -50,13 +51,15 @@ The MCP server of [MODBUS-MCP](../README.md). It is a [uv](https://docs.astral.s
    ```bash
    uv sync
    ```
-   This installs the versions pinned in the committed `uv.lock` (`mcp` 1.6.0, `pymodbus` 3.9.2). Install from the lockfile: the ranges in `pyproject.toml` also admit `mcp` 2.x and `pymodbus` 3.10+, which this server does not work with.
+   This installs the versions pinned in the committed `uv.lock` (`mcp` 1.30.0, `pymodbus` 3.15.0) plus the dev tools (pytest, ruff). The supported ranges in `pyproject.toml` are `mcp>=1.6.0,<2` and `pymodbus>=3.9.2,<3.16`: the full test suite passed with the latest patch release of every pymodbus minor from 3.9 to 3.15 and with mcp 1.6.0, 1.9.4, 1.10.1, 1.12.4, 1.16.0, 1.20.0, 1.25.0 and 1.30.0, and CI checks the lowest supported pair (pymodbus 3.9.2, mcp 1.6.0) on every change. pymodbus 3.10 renamed the unit-id keyword from `slave` to `device_id`; the server uses whichever the installed version takes. mcp 2.x removed `mcp.server.fastmcp` and is not supported.
 
 ## Configuration
 
 The server connects to a Modbus device using parameters specified via environment variables. Set these variables in a `.env` file (for example in `modbus-python/`) or your shell environment; variables already set in the environment take precedence.
 
-`modbus-mcp` is a stdio server, meant to be launched by an MCP client (see [Installing for Claude Desktop](#installing-for-claude-desktop), or the MCP Inspector command in [CONTRIBUTING.md](../CONTRIBUTING.md#testing-a-change)). Run by hand in a terminal, it prints nothing and waits for JSON-RPC on stdin. It tries to connect to the device at startup. If the device is unreachable, it logs a `Failed to connect` warning, and it exits with `RuntimeError: Failed to connect to Modbus <type> device` once a client connects.
+The configuration is read once, when the server starts (after `.env` is loaded), and checked. An invalid value (a port that is not a number, an unknown `MODBUS_TYPE`, `MODBUS_WRITES_ENABLED=maybe`, a tag map that does not exist or does not validate) stops the server with exit status 2 and a `modbus-mcp: configuration error: …` message on stderr. An empty value means the default.
+
+`modbus-mcp` is a stdio server, meant to be launched by an MCP client (see [Installing for Claude Desktop](#installing-for-claude-desktop), or the MCP Inspector command in [CONTRIBUTING.md](../CONTRIBUTING.md#testing-a-change)). Run by hand in a terminal, it prints nothing and waits for JSON-RPC on stdin; nothing but JSON-RPC is ever written to stdout. It connects to the device at startup. If the device is unreachable, it exits with `RuntimeError: Failed to connect to Modbus <type> device at <address>`. If the connection drops later, the next tool call reconnects.
 
 ### Environment Variables
 
@@ -64,18 +67,18 @@ The server connects to a Modbus device using parameters specified via environmen
 |----------------------------|--------------------------------------------------|----------------------|----------|
 | `MODBUS_TYPE`              | `tcp`, `udp`, or `serial`                        | `tcp`                | —        |
 | `MODBUS_HOST`              | Host for TCP/UDP                                | `127.0.0.1`          | For TCP/UDP |
-| `MODBUS_PORT`              | Port for TCP/UDP                                | `502`                | For TCP/UDP |
-| `MODBUS_DEFAULT_SLAVE_ID`  | Slave/Unit ID                                   | `1`                  | —        |
+| `MODBUS_PORT`              | Port for TCP/UDP (1-65535)                      | `502`                | For TCP/UDP |
+| `MODBUS_DEFAULT_SLAVE_ID`  | Slave/Unit ID used when a tool call omits `slave_id` (0-255) | `1`  | —        |
 | `MODBUS_SERIAL_PORT`       | Serial port (e.g., `/dev/ttyUSB0`, `COM1`)      | `/dev/ttyUSB0`       | For serial |
 | `MODBUS_BAUDRATE`          | Serial baud rate                                | `9600`               | For serial |
 | `MODBUS_PARITY`            | Serial parity: `N`, `E`, `O`                    | `N`                  | For serial |
-| `MODBUS_STOPBITS`          | Serial stop bits                                | `1`                  | For serial |
-| `MODBUS_BYTESIZE`          | Serial byte size                                | `8`                  | For serial |
-| `MODBUS_TIMEOUT`           | Serial timeout (seconds)                        | `1`                  | For serial |
-| `MODBUS_MAX_RETRIES`       | Max retry attempts for operations               | `2`                  | —        |
-| `MODBUS_RETRY_BACKOFF_BASE`| Backoff base in seconds (exponential)           | `0.2`                | —        |
-| `MODBUS_TOOL_TIMEOUT`      | Per-operation timeout (seconds)                 | unset (no timeout)   | —        |
-| `MODBUS_WRITES_ENABLED`    | Enable write operations (`true`/`false`)        | `true`               | —        |
+| `MODBUS_STOPBITS`          | Serial stop bits: `1`, `2`                      | `1`                  | For serial |
+| `MODBUS_BYTESIZE`          | Serial byte size: `5`-`8`                       | `8`                  | For serial |
+| `MODBUS_TIMEOUT`           | Serial timeout (seconds, > 0)                   | `1`                  | For serial |
+| `MODBUS_MAX_RETRIES`       | Retries after a failed request (0-10)           | `2`                  | —        |
+| `MODBUS_RETRY_BACKOFF_BASE`| Backoff base in seconds (doubled per retry)     | `0.2`                | —        |
+| `MODBUS_TOOL_TIMEOUT`      | Per-request timeout (seconds; unset or `0` = none) | unset             | —        |
+| `MODBUS_WRITES_ENABLED`    | Allow the write tools (`true`/`false`, also `1`/`0`, `yes`/`no`, `on`/`off`) | `false` | — |
 | `REGISTER_MAP_FILE`        | Path to JSON tag map file                       | unset                | —        |
 
 ### Example `.env` File
@@ -99,6 +102,8 @@ MODBUS_BYTESIZE=8
 MODBUS_TIMEOUT=1
 ```
 
+Neither enables writes. Add `MODBUS_WRITES_ENABLED=true` only when the model should be able to change the device.
+
 ## Usage
 
 ### Installing for Claude Desktop
@@ -119,14 +124,14 @@ The configuration file:
 
 ### Using Tools
 
-All tools return a structured object: `{ "success": bool, "data": any, "error": string|null, "meta": object }`.
+All tools return a structured object: `{ "success": bool, "data": any, "error": string|null, "meta": object }`. Addresses are zero-based. The examples use addresses that exist on the [mock device](../modbus-mock-server/README.md#register-map-unitslave-id-any) (every table holds addresses 0-99; 10-99 are unused, free for experiments); the writes need `MODBUS_WRITES_ENABLED=true`.
 
-1. Read one holding register
+1. Read one holding register (Valve Position on the mock)
    ```json
    { "tool": "read_register", "parameters": { "address": 0, "slave_id": 1 } }
    ```
 
-2. Write one holding register
+2. Write one holding register (an unused register on the mock)
    ```json
    { "tool": "write_register", "parameters": { "address": 10, "value": 100, "slave_id": 1 } }
    ```
@@ -138,10 +143,10 @@ All tools return a structured object: `{ "success": bool, "data": any, "error": 
 
 4. Write multiple coils
    ```json
-   { "tool": "write_coils_bulk", "parameters": { "address": 0, "values": [true, false, true], "slave_id": 1 } }
+   { "tool": "write_coils_bulk", "parameters": { "address": 10, "values": [true, false, true], "slave_id": 1 } }
    ```
 
-5. Read input registers
+5. Read input registers (Flow Rate, Tank Level, Vibration on the mock)
    ```json
    { "tool": "read_input_registers", "parameters": { "address": 2, "count": 3, "slave_id": 1 } }
    ```
@@ -156,9 +161,9 @@ All tools return a structured object: `{ "success": bool, "data": any, "error": 
    { "tool": "read_multiple_holding_registers", "parameters": { "address": 0, "count": 3, "slave_id": 1 } }
    ```
 
-8. Mask write a register
+8. Mask write a register: register = (register AND and_mask) OR (or_mask AND NOT and_mask); this sets the two low bits of register 20
    ```json
-   { "tool": "mask_write_register", "parameters": { "address": 100, "and_mask": 65535, "or_mask": 3, "slave_id": 1 } }
+   { "tool": "mask_write_register", "parameters": { "address": 20, "and_mask": 65532, "or_mask": 3, "slave_id": 1 } }
    ```
 
 9. Device information
@@ -166,12 +171,17 @@ All tools return a structured object: `{ "success": bool, "data": any, "error": 
    { "tool": "read_device_information", "parameters": { "slave_id": 1, "read_code": 3 } }
    ```
 
-10. Typed reads (with endianness and scaling); currently fails with `"Big"`, see [Known issues](#known-issues)
+10. Typed reads (with endianness and scaling): two float32 values in registers 40-43, low word first
    ```json
-   { "tool": "read_holding_typed", "parameters": { "address": 200, "dtype": "float32", "count": 2, "byteorder": "little", "wordorder": "big", "scale": 1.0, "offset": 0.0, "slave_id": 1 } }
+   { "tool": "read_holding_typed", "parameters": { "address": 40, "dtype": "float32", "count": 2, "byteorder": "big", "wordorder": "little", "scale": 1.0, "offset": 0.0, "slave_id": 1 } }
    ```
+   and the mock's pH (input register 5, stored x100) as a number:
+   ```json
+   { "tool": "read_input_typed", "parameters": { "address": 5, "dtype": "uint16", "scale": 0.01, "slave_id": 1 } }
+   ```
+   `data.values` holds `value * scale + offset`; with the default scale 1 and offset 0 the decoded values are returned unchanged (so 64-bit integers keep full precision). NaN and infinities come back as the strings `"NaN"`, `"Infinity"` and `"-Infinity"`, since JSON has no such numbers.
 
-11. Write multiple holding registers
+11. Write multiple holding registers (1-123 per call)
    ```json
    { "tool": "write_registers", "parameters": { "address": 50, "values": [1,2,3], "slave_id": 1 } }
    ```
@@ -180,18 +190,36 @@ All tools return a structured object: `{ "success": bool, "data": any, "error": 
    ```json
    { "tool": "ping", "parameters": {} }
    ```
+   `data` has `connected`, `device_reachable`, `probe_address`, `probe_slave_id`, `probe_response` (`"ok"` or the exception the device returned), `probe_latency_ms`, `probe_error`, and the configuration (`type`, `host`, `port`, `serial_port`, `writes_enabled`, `max_retries`, `tool_timeout`, `tag_count`). Pass `address` to probe a register other than 0.
 
 ### Tag Map (optional)
 
-Point `REGISTER_MAP_FILE` to a JSON file that defines named tags. Example file:
+Point `REGISTER_MAP_FILE` to a JSON file that defines named tags. Example file (it matches the mock device):
 
 ```json
 {
-  "PumpSpeed": { "table": "holding", "address": 100, "dtype": "float32", "count": 1, "byteorder": "big", "wordorder": "big", "slave_id": 1 },
-  "ValveOpen": { "table": "coil", "address": 5, "slave_id": 1 },
-  "Alarm": { "table": "discrete", "address": 10, "count": 4, "slave_id": 1 }
+  "ValvePosition": { "table": "holding", "address": 0, "unit": "%" },
+  "Temperature": { "table": "input", "address": 0, "dtype": "uint16", "scale": 0.1, "unit": "°C" },
+  "PumpSpeed": { "table": "holding", "address": 30, "dtype": "float32", "count": 1, "byteorder": "big", "wordorder": "big", "slave_id": 1 },
+  "PumpEnabled": { "table": "coil", "address": 0, "slave_id": 1 },
+  "Status": { "table": "discrete", "address": 0, "count": 2, "slave_id": 1 }
 }
 ```
+
+Keys of a tag:
+
+| Key | Meaning | Default |
+|-----|---------|---------|
+| `table` | `holding`, `input`, `coil` or `discrete` (aliases such as `hr`, `ir`, `coils`, `di` work) | `holding` |
+| `address` | Zero-based start address (required) | — |
+| `count` | Number of values (typed tags), registers (raw register tags) or bits | `1` |
+| `slave_id` | Unit id | `MODBUS_DEFAULT_SLAVE_ID` |
+| `dtype` | Holding/input only: one of the typed dtypes; without it a register tag is raw `uint16` | none |
+| `byteorder`, `wordorder` | Holding/input only: `big` or `little` | `big` |
+| `scale`, `offset` | Typed tags only: read returns `raw * scale + offset` (`scale` must not be 0) | `1`, `0` |
+| `description`, `unit` | Free text, shown by `list_tags` | none |
+
+The map is validated when the server starts: unknown keys or tables, a missing or out-of-range address, an unsupported dtype or order, typed keys on a coil/discrete tag, `scale`/`offset` without a `dtype`, or a tag that runs past address 65535 stop the server with a message naming the tag.
 
 Tools:
 
@@ -200,41 +228,48 @@ Tools:
   { "tool": "list_tags", "parameters": {} }
   ```
 
-- Read a tag (typed when `dtype` supplied; a typed read such as this `PumpSpeed` one currently fails, see [Known issues](#known-issues))
+- Read a tag (typed and scaled when the tag has a `dtype`; raw registers or bits otherwise)
   ```json
-  { "tool": "read_tag", "parameters": { "name": "PumpSpeed" } }
+  { "tool": "read_tag", "parameters": { "name": "Temperature" } }
   ```
 
 - Write a tag
-  - Coils: boolean
+  - Coils: `true` or `false` (a coil tag with `count` > 1 is refused; write those coils with `write_coils_bulk`)
     ```json
-    { "tool": "write_tag", "parameters": { "name": "ValveOpen", "value": true } }
+    { "tool": "write_tag", "parameters": { "name": "PumpEnabled", "value": true } }
     ```
-  - Holding registers: value or list of values, encoded by `dtype` (default `uint16`) and endianness. This currently fails for every holding-register tag, see [Known issues](#known-issues).
+  - Holding registers: a value, or a list of `count` values, in the units `read_tag` returns. The tag's `scale` and `offset` are reversed and the result is encoded by `dtype` (default `uint16`) and endianness. For an integer dtype the raw value must come out whole: on a tag with scale 0.1, `25.3` is written as 253, while `25.35` is refused.
     ```json
     { "tool": "write_tag", "parameters": { "name": "PumpSpeed", "value": 42.5 } }
     ```
+  - Input and discrete-input tags are read-only.
+
+## Testing
+
+```bash
+uv sync
+uv run pytest            # unit + integration tests
+uv run pytest -m "not integration"   # unit tests only, no subprocesses
+uv run ruff check && uv run ruff format --check
+```
+
+The integration tests (`-m integration`) start the mock device from `../modbus-mock-server` with `uv run --locked` on a free port, and drive `python -m modbus_mcp` over stdio with the MCP client SDK. They need `uv` on `PATH` and are skipped without it.
 
 ## Known issues
 
-These are bugs in `src/modbus_mcp/cli.py`, documented here until they are fixed:
-
-- **Typed values fail on every call.** `_to_endian()` returns `Endian.Big` / `Endian.Little`, but pymodbus 3.9.2, the version `uv.lock` pins, only defines `Endian.BIG`, `Endian.LITTLE` and `Endian.AUTO`. Every decode and encode therefore raises an `AttributeError`, which the tools return as `{"success": false, "error": "Big"}`. That breaks:
-  - `read_holding_typed` and `read_input_typed`, once the registers have been read;
-  - `read_tag` on a tag with a `dtype`;
-  - `write_tag` on a holding-register tag, even one without a `dtype`, because it always encodes (default `uint16`). Nothing is written to the device.
-
-  Not affected: the raw register, coil and discrete-input tools, `read_tag` on tags without a `dtype`, and `write_tag` on coil tags. The fix is to use `Endian.BIG` / `Endian.LITTLE` in `_to_endian()`.
+- **The server needs the device at startup.** It connects when it starts and exits if the device is unreachable, so an MCP client that launches it before the device is up has to restart it. After a successful start, dropped connections are re-established on the next tool call.
+- **Retried writes can reach the device twice.** A write whose reply is lost (timeout) is retried up to `MODBUS_MAX_RETRIES` times, like a read. A repeat writes the same value or mask again: harmless for a setpoint, not necessarily for a command register that acts on every write. Set `MODBUS_MAX_RETRIES=0` if that matters for your device.
+- **With mcp 1.6-1.9 the server does not exit when stdin closes.** That is the mcp SDK's stdio transport; MCP clients stop it with SIGTERM afterwards, as the protocol specifies. The locked mcp 1.30.0 exits on its own.
 
 ## Testing, Security and Contributing
 
-- Run it against the mock device: [`../modbus-mock-server`](../modbus-mock-server/README.md) (note its [known issues](../modbus-mock-server/README.md#known-issues)).
-- Write tools are allowed unless `MODBUS_WRITES_ENABLED=false`; read [SECURITY.md](../SECURITY.md) before pointing the server at real equipment.
+- Run it against the mock device: [`../modbus-mock-server`](../modbus-mock-server/README.md).
+- Write tools are disabled unless `MODBUS_WRITES_ENABLED=true`; read [SECURITY.md](../SECURITY.md) before pointing the server at real equipment.
 - Development setup, the CI checks and pull request conventions: [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ## Acknowledgements
 
-This server is derived from [kukapay/modbus-mcp](https://github.com/kukapay/modbus-mcp) and still contains substantial portions of it: much of `src/modbus_mcp/cli.py`, and `pyproject.toml` and `uv.lock` as they were upstream. Those portions are Copyright (c) 2025 kukapay and used under the MIT License. kukapay's license text is kept unchanged in [LICENSE-kukapay](LICENSE-kukapay).
+This server is derived from [kukapay/modbus-mcp](https://github.com/kukapay/modbus-mcp) and still contains portions of it, notably in `src/modbus_mcp/cli.py`. Those portions are Copyright (c) 2025 kukapay and used under the MIT License. kukapay's license text is kept unchanged in [LICENSE-kukapay](LICENSE-kukapay).
 
 ## License
 

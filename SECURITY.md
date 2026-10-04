@@ -16,30 +16,49 @@ is offered.
 So treat this server as equipment on the control network, not as an
 application on the office network.
 
-## Writes are enabled by default
+## Writes are disabled by default
 
 Six tools change device state: `write_register`, `write_registers`,
 `write_coil`, `write_coils_bulk`, `mask_write_register` and `write_tag`.
-They are allowed unless you set:
+They refuse to send anything unless the server is started with:
 
 ```bash
-MODBUS_WRITES_ENABLED=false
+MODBUS_WRITES_ENABLED=true
 ```
 
-With writes disabled, those tools are still listed to the client but return
-`{ "success": false, "error": "Writes are disabled by configuration" }` without
-sending anything to the device. There is no per-register allowlist and no value
-range check — when writes are enabled, any address the device accepts can be
-written with any value Modbus can carry.
+Without it, those tools are still listed to the client but return
+`{ "success": false, "error": "Writes are disabled by configuration (set
+MODBUS_WRITES_ENABLED=true to allow them)" }` without sending anything to the
+device. Only a recognised true/false value is accepted; anything else stops the
+server at startup instead of being read as one or the other.
+
+What the server checks before a write, when writes are enabled:
+
+- Arguments must fit Modbus: addresses and register values 0-65535, unit ids
+  0-255, at most 123 registers or 1968 coils per request. A value that does not
+  fit is refused, never truncated or wrapped.
+- `write_tag` only writes the registers or coils its tag defines (exactly
+  `count` values), only to holding-register and coil tags, and only values the
+  tag's dtype can hold exactly after reversing its scale and offset.
+
+What it does not check: there is no per-register allowlist and no
+engineering-range check. When writes are enabled, any address the device
+accepts can be written with any value that fits the register. A write whose
+reply is lost (timeout) is retried up to `MODBUS_MAX_RETRIES` times (default 2),
+so it can reach the device more than once. A repeat writes the same value or
+mask again: harmless for a setpoint, not necessarily for a command register
+that acts on every write it receives. Set `MODBUS_MAX_RETRIES=0` if that
+matters for your equipment.
 
 ## Running it safely
 
 - **Start against the mock.** This repository ships a mock Modbus TCP device
   ([`modbus-mock-server/`](modbus-mock-server/)) so that an agent can be
   exercised end to end without touching real plant. Do that first, every time.
-- **Set `MODBUS_WRITES_ENABLED=false` until you mean otherwise.** Write tools
-  move physical equipment. There is no undo, and a language model will call a
-  tool it has been given.
+- **Leave `MODBUS_WRITES_ENABLED` unset until you mean otherwise.** Write
+  tools move physical equipment. There is no undo, and a language model will
+  call a tool it has been given. `ping` reports `writes_enabled`, so you can
+  check what a running server allows.
 - **Do not expose the server beyond the host running the client.** It is a
   stdio process meant to run beside the MCP client, not a network service.
 - **Segment the network.** The server should sit where a PLC engineering

@@ -2,21 +2,21 @@
 
 A lightweight Modbus TCP mock server to test Modbus clients (e.g., the MCP server in [`../modbus-python`](../modbus-python/README.md)), part of [MODBUS-MCP](../README.md).
 
-> [!WARNING]
-> The mock currently answers register, coil and discrete-input requests with Modbus exception 4 instead of the values below — see [Known issues](#known-issues).
-
 ## Features
 
 - Simulated process values updated every second
 - Writable setpoints/controls via holding registers and coils
 - Read-only sensors via input registers and discrete inputs
 - Simple command registers to start/stop/reset/emergency-stop
+- Device identification (function 43 / MEI 14)
 - Defaults to TCP port `1502` (non-root)
 
 ## Register Map (unit/slave ID: any)
 
+Each table (coils, discrete inputs, holding registers, input registers) holds 100 entries, addresses 0-99; a request beyond that gets Modbus exception 2 (Illegal Data Address). The addresses not listed below are unused and start at 0, so they are free for experiments. The values listed are the ones the mock starts with.
+
 - Coils (RW)
-  - `00001` (addr 0): Pump Enabled
+  - `00001` (addr 0): Pump Enabled (starts off)
   - `00002` (addr 1): Alarm Active (set by simulation; write ignored)
 
 - Discrete Inputs (RO)
@@ -24,7 +24,7 @@ A lightweight Modbus TCP mock server to test Modbus clients (e.g., the MCP serve
   - `10002` (addr 1): System Running
 
 - Holding Registers (RW)
-  - `40001` (addr 0): Valve Position (0-100)
+  - `40001` (addr 0): Valve Position (0-100), starts at 50
   - `40002` (addr 1): Heater Power (0-100)
   - `40003` (addr 2): Fan Speed (0-100)
   - `40004` (addr 3): Conveyor Speed (0-100)
@@ -36,17 +36,17 @@ A lightweight Modbus TCP mock server to test Modbus clients (e.g., the MCP serve
   - `40010` (addr 9): Command Reset (write >0)
 
 - Input Registers (RO, scaled where noted)
-  - `30001` (addr 0): Temperature x10 (e.g., 253 = 25.3°C)
-  - `30002` (addr 1): Pressure (hPa)
+  - `30001` (addr 0): Temperature x10 (e.g., 253 = 25.3°C), starts near 250
+  - `30002` (addr 1): Pressure (hPa), starts near 1013
   - `30003` (addr 2): Flow Rate (L/min)
-  - `30004` (addr 3): Tank Level x10 (0-1000)
+  - `30004` (addr 3): Tank Level x10 (0-1000), starts near 750
   - `30005` (addr 4): Vibration x100
-  - `30006` (addr 5): pH Level x100
-  - `30007` (addr 6): Humidity x10
+  - `30006` (addr 5): pH Level x100, starts near 720
+  - `30007` (addr 6): Humidity x10, starts near 450
   - `30008` (addr 7): Motor Speed (RPM)
   - `30009` (addr 8): Total Production (units, 16-bit, wraps)
 
-Notes: Addresses shown as Modbus-style 1-based with zero-based in parentheses.
+Notes: Addresses shown as Modbus-style 1-based with zero-based in parentheses. The command registers are cleared once the simulation has acted on them (within one update interval).
 
 ## Install
 
@@ -57,7 +57,7 @@ cd modbus-mock-server
 uv sync  # installs deps (pinned in uv.lock) and entry points
 ```
 
-`.python-version` asks for Python 3.10, so `uv sync` uses a 3.10 it finds or downloads one.
+`.python-version` asks for Python 3.10, so `uv sync` uses a 3.10 it finds or downloads one. `uv.lock` pins pymodbus 3.12.1; see [Known issues](#known-issues) for the supported range.
 
 ## Run
 
@@ -68,10 +68,12 @@ MODBUS_HOST=127.0.0.1 uv run modbus-mock-server
 MODBUS_HOST=127.0.0.1 uv run python -m modbus_local_server
 ```
 
-Environment overrides:
+Environment overrides (read when the mock starts):
 - `MODBUS_HOST` (default: `0.0.0.0`; use `127.0.0.1` to keep the mock off your network)
 - `MODBUS_PORT` (default: `1502`)
 - `UPDATE_INTERVAL` seconds (default: `1.0`)
+
+The mock logs to stderr. If a simulation step fails, it logs the error with a traceback (once per distinct error) and keeps running.
 
 ## Test with modbus-mcp
 
@@ -80,23 +82,23 @@ The MCP server in [`modbus-python/`](../modbus-python/README.md) is a stdio serv
 ```bash
 (cd modbus-python && uv sync)
 npx @modelcontextprotocol/inspector \
-  -e MODBUS_HOST=127.0.0.1 -e MODBUS_PORT=1502 \
+  -e MODBUS_HOST=127.0.0.1 -e MODBUS_PORT=1502 -e MODBUS_WRITES_ENABLED=true \
   uv --directory modbus-python run modbus-mcp
 ```
 
+`MODBUS_WRITES_ENABLED=true` lets the server write to the mock; leave it out to try the server read-only, its default.
+
 Then try these tools from the client:
-- `read_register(address=0)` → Valve Position
-- `write_register(address=1, value=50)` → Heater Power = 50%
+- `read_register(address=0)` → Valve Position (50)
+- `write_register(address=1, value=50)` → Heater Power = 50% (the temperature rises towards 50°C)
 - `read_input_registers(address=0, count=4)` → Temperature/Pressure/Flow/Tank Level
-- `write_register(address=6, value=1)` → Start command (AUTO mode + pump on)
+- `write_register(address=4, value=10)`, then `write_register(address=6, value=1)` → production setpoint 10/h, then Start command (AUTO mode, pump on, System Running)
+
+The modbus-python test suite runs the same kind of checks automatically: `uv run pytest` in `modbus-python` starts this mock on a free port.
 
 ## Known issues
 
-These are bugs in `modbus_local_server.py`, documented here until they are fixed:
-
-- **Every register, coil and discrete-input request fails.** `build_context()` passes `devices={0x00: device}` together with `single=True`, and pymodbus wraps that dict again, so the datastore lookup returns a `dict` instead of the device context. The server logs `'dict' object has no attribute 'async_getValues'` and answers with exception 4 (server device failure); the simulation loop fails the same way and silently retries. Device identification (`read_device_information`) is unaffected and returns the identity below.
-- **Initial values are one register off.** `build_context()` seeds the data blocks at index 0, but pymodbus maps protocol address 0 to block index 1, so e.g. Valve Position would start at 0 rather than 50.
-- **Only pymodbus 3.10–3.12 can start it.** It imports `ModbusDeviceContext` (new in 3.10), and pymodbus 3.13+ rejects `ModbusSequentialDataBlock(0, ...)` at startup. `uv.lock` therefore pins pymodbus 3.12.1. pymodbus 3.10+ needs Python 3.10+, so the project requires Python 3.10+ too.
+- **Only pymodbus 3.11 and 3.12 can run it.** It is built on `ModbusDeviceContext`/`ModbusServerContext`, which appeared in pymodbus 3.10. pymodbus 3.10.0 answers reads past the 100-entry tables with short replies instead of exception 2, and pymodbus 3.13 replaced this datastore API (the mock fails at startup). `pyproject.toml` therefore asks for `pymodbus>=3.11,<3.13`, and `uv.lock` pins 3.12.1. Moving to pymodbus' newer `SimDevice` API would lift the upper bound. pymodbus 3.10+ needs Python 3.10+, so the project requires Python 3.10+ too.
 
 Device identity served: VendorName `Mock ICS`, ProductCode `MODBUS-MOCK`, MajorMinorRevision `0.1`.
 

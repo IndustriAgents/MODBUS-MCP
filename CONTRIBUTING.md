@@ -20,6 +20,7 @@ IndustriConnect.
 ```text
 MODBUS-MCP/                  # mounted as MODBUS-Project/ inside IndustriConnect
 ├── modbus-python/           # the MCP server: uv project, src/modbus_mcp/, `modbus-mcp` entry point
+│   └── tests/               # pytest: unit tests, plus integration tests against the mock
 ├── modbus-mock-server/      # simulated Modbus TCP device: uv project, `modbus-mock-server` entry point
 └── .github/                 # CI, issue and pull request templates
 ```
@@ -34,10 +35,10 @@ change that breaks one of these needs a reason in the pull request:
 
 1. **One response envelope.** Every tool returns `{ success, data, error, meta }`.
    A client that can read one IndustriConnect server's output can read them all.
-2. **Writes are gated.** Tools that write a coil or a register change physical
-   equipment. Here they are gated by `MODBUS_WRITES_ENABLED`, which currently
-   defaults to `true`; the suite's direction is read-only by default, and
-   changes that move this server toward it are welcome.
+2. **Read-only by default.** Tools that write a coil or a register change
+   physical equipment. Here they refuse to send anything unless the server was
+   started with `MODBUS_WRITES_ENABLED=true` (the default is `false`). A new
+   write tool must check the same switch.
 3. **A mock for every tool.** If you add a tool, the mock has to be able to
    answer it, or nobody can test it without a plant.
 
@@ -61,39 +62,49 @@ uv sync
 
 `modbus-mcp` is a stdio server. Run by hand, it prints nothing and waits for
 JSON-RPC on stdin, so let an MCP client launch it: the Inspector command under
-[Testing a change](#testing-a-change) does that. The server tries to connect to
-the device at startup. If the device is unreachable, it exits with
-`RuntimeError: Failed to connect to Modbus tcp device` once a client connects,
-so start the mock first.
+[Testing a change](#testing-a-change) does that. The server connects to the
+device at startup. If the device is unreachable, it exits with
+`RuntimeError: Failed to connect to Modbus tcp device at <host>:<port>`, so
+start the mock first.
 
 ### Lockfiles
 
 Both projects commit `uv.lock`, and `uv sync` installs exactly what it pins.
-That matters more than usual here: the dependency ranges in
-`modbus-python/pyproject.toml` admit releases the server does not work with
-(`mcp` 2.x removed `mcp.server.fastmcp`; `pymodbus` 3.10+ removed
-`pymodbus.payload`), and the mock only starts on `pymodbus` 3.10–3.12. If you
-change dependencies, run `uv lock` in that project, commit the lockfile, and
-check that `uv sync --locked` still passes.
+The ranges in the two `pyproject.toml` files are the versions the tests pass
+on: the server takes `mcp>=1.6.0,<2` and `pymodbus>=3.9.2,<3.16`, the mock
+`pymodbus>=3.11,<3.13` (see their READMEs for why). CI runs the server's tests
+on the locked versions and again on the lowest supported ones, so if you widen
+a range, run the suite on the new end first (for example
+`uv pip install "pymodbus==X"` in the synced environment, then
+`uv run --no-sync pytest`, then `uv sync --locked` to go back). If you change
+dependencies, run `uv lock` in that project, commit the lockfile, and check
+that `uv sync --locked` still passes.
 
 ## Testing a change
 
-There is no automated test suite yet. CI
-([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs cheap checks that
-need no device; run the same ones locally, from the repository root, before
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs ruff and the
+test suite. Run the same steps locally, from the repository root, before
 opening a pull request:
 
 ```bash
 cd modbus-python
 uv sync --locked
-uv run --locked python -m compileall -q src
-uv run --locked python -c "import asyncio; from modbus_mcp.cli import mcp; print(len(asyncio.run(mcp.list_tools())), 'tools')"
+uv run --locked ruff check
+uv run --locked ruff format --check
+uv run --locked pytest
 
 cd ../modbus-mock-server
 uv sync --locked
-uv run --locked python -m compileall -q modbus_local_server.py
+uv run --locked ruff check
+uv run --locked ruff format --check
 uv run --locked python -c "import modbus_local_server as m; m.build_context(); print('datastore ok')"
 ```
+
+`modbus-python/tests` holds unit tests (an in-memory fake device; no network)
+and integration tests marked `integration`, which start the mock from
+`modbus-mock-server` with `uv run --locked` on a free port and drive the real
+server over stdio with the MCP client SDK. `uv run pytest -m "not integration"`
+runs only the unit tests. A fix should come with a test that fails without it.
 
 Then drive the server the way a user would — through the
 [MCP Inspector](https://modelcontextprotocol.io/docs/tools/inspector) or a real
@@ -105,14 +116,8 @@ npx @modelcontextprotocol/inspector \
   uv --directory modbus-python run modbus-mcp
 ```
 
-Call the tool you changed, and check the envelope, not just the value.
-
-> [!NOTE]
-> The mock currently answers every register, coil and discrete-input request
-> with a Modbus exception — see [Known issues](modbus-mock-server/README.md#known-issues).
-> Until that is fixed, only `ping`, `list_tags` and `read_device_information`
-> succeed against it. Separately, the typed tools fail with `"Big"` on any
-> device — see the server's [Known issues](modbus-python/README.md#known-issues).
+Add `-e MODBUS_WRITES_ENABLED=true` to exercise the write tools. Call the tool
+you changed, and check the envelope, not just the value.
 
 **Do not test against production equipment.** If a change genuinely cannot be
 verified against the mock, say so in the pull request and describe the bench
@@ -121,10 +126,20 @@ you used.
 ## House rules for the code
 
 - MCP speaks over **stdio**, so `stdout` belongs to the protocol. All logging
-  goes to `stderr`. A stray `print()` in the server corrupts the session.
-- Fail at startup, not at the first tool call, when configuration is unusable.
+  goes to `stderr`. A stray `print()` in the server corrupts the session; ruff's
+  `T20` rules reject `print` in the server code, and a test checks that stdout
+  carries only JSON-RPC.
+- Read configuration in `main()` (after `.env` is loaded), never at import
+  time, and fail at startup, not at the first tool call, when it is unusable.
 - An error is a returned `{ success: false, error }`, not an exception that
-  kills the server. The model needs to be told what went wrong.
+  kills the server. The model needs to be told what went wrong. Invalid
+  arguments and unexpected exceptions are turned into that envelope too.
+- Never report success for something that did not happen, and never return
+  values the device did not send (no padding, truncating or rounding to make a
+  call succeed).
+- `Context.info()`/`Context.error()` are coroutines: `await` them.
+- Every tool needs a docstring and parameter descriptions; they are what the
+  model sees in `tools/list`.
 - Keep tool names and argument names aligned with the other IndustriConnect
   servers.
 
