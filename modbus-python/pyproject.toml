@@ -5,14 +5,18 @@ description = "An MCP server that standardizes and contextualizes Modbus data, e
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    # mcp 2.x removed mcp.server.fastmcp, which this server is built on; 1.7.0
-    # added tool annotations (read-only / destructive hints).
-    "mcp[cli]>=1.7.0,<2",
+    # mcp 2.x removed mcp.server.fastmcp, which this server is built on. Up to
+    # 1.12.2 a client's notifications/cancelled left the session unable to answer
+    # any later request (checked with a stock FastMCP server); 1.12.3 is the first
+    # release where cancelling a call works. Tool annotations need >= 1.7.0.
+    "mcp[cli]>=1.12.3,<2",
     # Tested with every pymodbus minor release from 3.9.2 to 3.15; 3.10 renamed
     # the unit-id keyword (slave -> device_id), which cli.py handles at runtime.
     # The serial extra (pyserial) is what MODBUS_TYPE=serial needs.
     "pymodbus[serial]>=3.9.2,<3.16",
     "python-dotenv>=1.1.0",
+    # BaseExceptionGroup on Python 3.10 (anyio raises the backport's groups there).
+    "exceptiongroup>=1.0.2; python_version < '3.11'",
 ]
 
 [project.scripts]

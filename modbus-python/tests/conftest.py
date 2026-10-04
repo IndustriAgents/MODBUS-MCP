@@ -84,6 +84,9 @@ class FakeClient:
         self.close_calls = 0
         # Optional hook: called with the method name before each request; may raise.
         self.before: Callable[[str], None] | None = None
+        # Like pymodbus' trace_packet: called right before a request goes out (make_ctx
+        # installs cli.SendGate here, which may refuse the send).
+        self.trace_packet: Callable[[bool, bytes], bytes] | None = None
 
     # --- connection -------------------------------------------------------
     async def connect(self) -> bool:
@@ -102,6 +105,8 @@ class FakeClient:
             self.before(name)
         if not self.connected:
             raise ConnectionException("Not connected[fake]")
+        if self.trace_packet is not None:
+            self.trace_packet(True, b"")
         self.sent.append((name, kwargs))
         address, count = kwargs.get("address", 0), kwargs.get("count", 1)
         if address < 0 or address + count > self.SIZE:
@@ -239,10 +244,11 @@ def make_ctx(client: FakeClient, tags: dict | None = None, **settings: Any) -> F
 
     app = cli.AppContext(
         modbus_client=client,
-        settings=Settings(retry_backoff_base=0.0, **settings),
+        settings=Settings(**{"retry_backoff_base": 0.0, **settings}),
         tags=parse_tag_map(tags or {}),
-        frames_sent=lambda: len(client.sent),  # like cli.FrameCounter on a real client
+        frames_sent=lambda: len(client.sent),
     )
+    client.trace_packet = cli.SendGate(lambda: app.closing())  # as the lifespan does
     return FakeContext(app)
 
 

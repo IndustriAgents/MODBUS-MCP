@@ -86,7 +86,7 @@ def test_the_backstop_ends_a_call_that_ignores_the_deadline(client, monkeypatch)
     monkeypatch.setattr(cli.ModbusMCP, "_call_timeout", lambda self: 0.2)
     for tool, arguments, outcome in [
         ("read_register", {"address": 0}, None),
-        ("write_register", {"address": 0, "value": 1}, "unknown"),
+        ("write_register", {"address": 0, "value": 1}, "not_sent"),  # it never got to send
     ]:
         start = time.monotonic()
         result = asyncio.run(cli.mcp.call_tool(tool, arguments))

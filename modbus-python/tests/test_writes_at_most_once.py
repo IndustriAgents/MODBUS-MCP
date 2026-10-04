@@ -239,14 +239,14 @@ def test_an_unexpected_failure_after_sending_is_unknown(client) -> None:
 
 
 def test_the_frame_counter_counts_only_frames_being_sent() -> None:
-    counter = cli.FrameCounter()
+    counter = cli.SendGate()
     assert counter(True, b"\x01") == b"\x01" and counter(False, b"\x02") == b"\x02"
     assert counter.sent == 1
 
 
 def test_the_real_client_gets_the_frame_counter() -> None:
     async def build():
-        counter = cli.FrameCounter()
+        counter = cli.SendGate()
         client = cli._make_client(Settings(), counter)
         try:
             return client.ctx.trace_packet is counter

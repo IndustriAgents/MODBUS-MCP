@@ -419,6 +419,7 @@ name = "modbus-mcp"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "exceptiongroup", marker = "python_full_version < '3.11'" },
     { name = "mcp", extra = ["cli"] },
     { name = "pymodbus", extra = ["serial"] },
     { name = "python-dotenv" },
@@ -432,7 +433,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "mcp", extras = ["cli"], specifier = ">=1.7.0,<2" },
+    { name = "exceptiongroup", marker = "python_full_version < '3.11'", specifier = ">=1.0.2" },
+    { name = "mcp", extras = ["cli"], specifier = ">=1.12.3,<2" },
     { name = "pymodbus", extras = ["serial"], specifier = ">=3.9.2,<3.16" },
     { name = "python-dotenv", specifier = ">=1.1.0" },
 ]

@@ -24,16 +24,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
+import anyio
 from dotenv import dotenv_values
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.fastmcp.prompts import base
+from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, ToolAnnotations
 from pydantic import Field, ValidationError
 from pymodbus.client import AsyncModbusSerialClient, AsyncModbusTcpClient, AsyncModbusUdpClient
 from pymodbus.exceptions import ConnectionException, ModbusException
 
 from . import __version__, codec
+
+if sys.version_info < (3, 11):  # anyio raises the backport's groups on 3.10
+    from exceptiongroup import BaseExceptionGroup
 from .config import ConfigError, Settings, Tag, load_tag_map
 
 log = logging.getLogger("modbus_mcp")  # stderr, via FastMCP's logging setup
@@ -149,24 +154,42 @@ class AppContext:
     tags: dict[str, Tag] = field(default_factory=dict)
     # Tool calls can run concurrently; only one of them should reconnect.
     reconnect_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    # Number of request frames handed to the transport so far (see FrameCounter);
+    # Number of request frames handed to the transport so far (see SendGate);
     # None when unknown. It tells a write that went out from one that did not.
     frames_sent: Callable[[], int] | None = None
+    # True once the MCP client has disconnected: nothing may be sent any more.
+    closing: Callable[[], bool] = lambda: False
 
 
-class FrameCounter:
-    """pymodbus trace_packet hook: counts frames as they are handed to the transport.
+class RequestNotSent(Exception):
+    """Raised by SendGate in place of sending a request that must not go out."""
 
-    pymodbus calls trace_packet(True, frame) once the request is fully encoded,
-    immediately before sending it, so an unchanged count means nothing went out.
+
+class SendGate:
+    """pymodbus trace_packet hook: the last check before a request leaves, and a counter.
+
+    pymodbus calls trace_packet(True, frame) once a request is fully encoded,
+    synchronously and immediately before handing it to the transport: there is
+    no await between this check and the send. It refuses the send (raising
+    RequestNotSent, so nothing is written) when the MCP client has disconnected,
+    the tool call was cancelled, or its deadline has passed; a request that was
+    queued, reconnecting or waiting then is never sent later. Otherwise it counts
+    the frame, so an unchanged count means nothing went out.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, closing: Callable[[], bool] = lambda: False) -> None:
         self.sent = 0
+        self._closing = closing
 
     def __call__(self, sending: bool, data: bytes) -> bytes:
         if sending:
+            reason = _why_not_send(self._closing())
+            if reason is not None:
+                raise RequestNotSent(reason)
             self.sent += 1
+            state = _CALL.get()
+            if state is not None:
+                state.sent = True
         return data
 
 
@@ -376,10 +399,23 @@ async def _reconnect(ctx: Context, app: AppContext, op: str) -> bool:
         return True
 
 
-# The deadline of the tool call in progress: (loop time it expires, its length in s).
-# Set by run_with_deadline(); every request and retry stops when it is reached.
-_DEADLINE: contextvars.ContextVar[tuple[float, float] | None] = contextvars.ContextVar(
-    "modbus_mcp_deadline", default=None
+@dataclass
+class _CallState:
+    """One tool call in progress: its deadline, and whether it may still send."""
+
+    expires: float  # event-loop time
+    seconds: float
+    cancelled: bool = False  # it ended without a result: nothing of it may be sent
+    sent: bool = False  # one of its requests was handed to the transport
+
+    @classmethod
+    def start(cls, seconds: float) -> "_CallState":
+        return cls(asyncio.get_running_loop().time() + seconds, seconds)
+
+
+# The tool call in progress, seen by everything it runs, including SendGate.
+_CALL: contextvars.ContextVar[_CallState | None] = contextvars.ContextVar(
+    "modbus_mcp_call", default=None
 )
 # How long after the deadline the hard backstop in ModbusMCP.call_tool fires.
 DEADLINE_BACKSTOP = 2.0
@@ -387,15 +423,29 @@ DEADLINE_BACKSTOP = 2.0
 
 def _remaining() -> float | None:
     """Seconds left before the current tool call's deadline; None without one."""
-    deadline = _DEADLINE.get()
-    if deadline is None:
+    state = _CALL.get()
+    if state is None:
         return None
-    return deadline[0] - asyncio.get_running_loop().time()
+    return state.expires - asyncio.get_running_loop().time()
+
+
+def _why_not_send(closing: bool) -> str | None:
+    """Why the current call must not send anything now, or None."""
+    if closing:
+        return "the MCP client disconnected"
+    state = _CALL.get()
+    if state is None:
+        return None
+    if state.cancelled:
+        return "the call was cancelled"
+    if asyncio.get_running_loop().time() >= state.expires:
+        return _deadline_error()
+    return None
 
 
 def _deadline_error() -> str:
-    deadline = _DEADLINE.get()
-    seconds = deadline[1] if deadline else 0
+    state = _CALL.get()
+    seconds = state.seconds if state else 0
     return f"no result within the {seconds:g} s deadline (MODBUS_CALL_TIMEOUT)"
 
 
@@ -407,19 +457,27 @@ def _limit(timeout: float | None) -> float | None:
     return remaining if timeout is None else min(timeout, remaining)
 
 
-async def run_with_deadline(seconds: float, coro: Awaitable[Any]) -> Any:
+async def run_with_deadline(
+    seconds: float, coro: Awaitable[Any], state: _CallState | None = None
+) -> Any:
     """Run `coro` (a tool call) with an overall deadline of `seconds`.
 
     _retry_call shortens every request, reconnect and backoff to fit, so a call
     ends with a precise outcome when the deadline is reached. As a backstop, the
     whole call is cancelled DEADLINE_BACKSTOP seconds later (asyncio.TimeoutError).
+    If the call ends without a result for any reason (cancelled by the client,
+    the client disconnecting, the backstop), it is marked cancelled first, so
+    nothing it queued can be sent afterwards (see SendGate).
     """
-    loop = asyncio.get_running_loop()
-    token = _DEADLINE.set((loop.time() + seconds, seconds))
+    state = state or _CallState.start(seconds)
+    token = _CALL.set(state)
     try:
         return await asyncio.wait_for(coro, seconds + DEADLINE_BACKSTOP)
+    except BaseException:
+        state.cancelled = True
+        raise
     finally:
-        _DEADLINE.reset(token)
+        _CALL.reset(token)
 
 
 def _sent_since(app: AppContext, frames_before: int | None) -> bool | None:
@@ -472,6 +530,13 @@ async def _retry_call(
         if attempt > 1:
             backoff = settings.retry_backoff_base * (2 ** (attempt - 2))
             await asyncio.sleep(max(0.0, _limit(backoff) or 0.0))
+        state = _CALL.get()
+        if app.closing() or (state is not None and state.cancelled):
+            # The client disconnected or the call was cancelled: stop, send nothing more.
+            not_now = _why_not_send(app.closing())
+            last_err = f"the request was not sent: {not_now}"
+            details.update(request_sent=_sent_since(app, frames_at_start), cause=not_now)
+            break
         remaining = _remaining()
         if remaining is not None and remaining <= 0:  # the call's deadline has passed
             last_err = _deadline_error() if last_err is None else f"{_deadline_error()}: {last_err}"
@@ -490,6 +555,10 @@ async def _retry_call(
         try:
             result = await _with_timeout(call_factory(), _limit(settings.tool_timeout))
             return result, None, elapsed_ms(), attempt
+        except RequestNotSent as e:  # SendGate refused: nothing went out
+            last_err = f"the request was not sent: {e}"
+            details.update(request_sent=False, cause=str(e))
+            break
         except ConnectionException as e:
             # Raised before anything is sent, so retrying cannot repeat a write.
             last_err = f"cannot reach device at {settings.target}"
@@ -707,8 +776,8 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     at ..."; every call tries to connect again (see _retry_call/_reconnect).
     """
     settings, tags = _config if _config is not None else load_config()
-    frames = FrameCounter()
-    client = _make_client(settings, frames)
+    gate = SendGate(lambda: getattr(server, "client_gone", False))
+    client = _make_client(settings, gate)
     try:
         await client.connect()
     except Exception as exc:  # e.g. a serial port that cannot be opened
@@ -723,7 +792,11 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
         )
     try:
         yield AppContext(
-            modbus_client=client, settings=settings, tags=tags, frames_sent=lambda: frames.sent
+            modbus_client=client,
+            settings=settings,
+            tags=tags,
+            frames_sent=lambda: gate.sent,
+            closing=lambda: getattr(server, "client_gone", False),
         )
     finally:
         client.close()
@@ -740,13 +813,33 @@ def _describe_validation_error(exc: ValidationError) -> str:
     return "; ".join(parts)
 
 
+# Errors from writing a reply to a client that has gone away.
+_UNDELIVERABLE = (
+    anyio.ClosedResourceError,
+    anyio.BrokenResourceError,
+    BrokenPipeError,
+    ConnectionResetError,
+)
+
+
 class ModbusMCP(FastMCP):
     """FastMCP that returns the {success, data, error, meta} envelope for every tool failure.
 
     FastMCP turns invalid arguments (and any exception a tool raises) into a bare
     error string. Clients of IndustriConnect servers parse the envelope, so give
     them one: success=false with the reason in `error`.
+
+    It also bounds every call (MODBUS_CALL_TIMEOUT) and stops pending calls when
+    the client disconnects: FastMCP stops reading at end of stdin but lets
+    in-flight tool calls finish, so a write still connecting or queued would
+    otherwise be sent after the client had gone.
     """
+
+    client_gone: bool = False
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._call_scopes: set[anyio.CancelScope] = set()
 
     def _call_timeout(self) -> float:
         """MODBUS_CALL_TIMEOUT of the running server (the default outside a session)."""
@@ -755,21 +848,89 @@ class ModbusMCP(FastMCP):
         except Exception:
             return Settings().call_timeout
 
-    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
-        seconds = self._call_timeout()
+    def client_disconnected(self) -> None:
+        """The client is gone: send nothing more, and cancel every call in progress."""
+        if self.client_gone:
+            return
+        self.client_gone = True
+        log.info("MCP client disconnected; stopping %d pending call(s)", len(self._call_scopes))
+        for scope in list(self._call_scopes):
+            scope.cancel()
+
+    async def run_stdio_async(self) -> None:
+        """Serve stdio; when stdin ends, stop pending calls before FastMCP finishes them."""
+        self.client_gone = False
         try:
-            return await run_with_deadline(seconds, self._call_tool(name, arguments))
+            async with stdio_server() as (read_stream, write_stream):
+                relay_send, relay_receive = anyio.create_memory_object_stream(0)
+                async with anyio.create_task_group() as tg:
+                    tg.start_soon(self._relay_until_eof, read_stream, relay_send)
+                    await self._mcp_server.run(
+                        relay_receive,
+                        write_stream,
+                        self._mcp_server.create_initialization_options(),
+                    )
+                    tg.cancel_scope.cancel()
+        except BaseExceptionGroup as group:
+            # Replies to calls that were still running cannot be delivered once
+            # the client is gone; that is a normal end, not a crash.
+            _, rest = group.split(_UNDELIVERABLE)
+            if not self.client_gone or rest is not None:
+                raise
+            log.info("dropped replies for the disconnected client")
+
+    async def _relay_until_eof(self, source: Any, sink: Any) -> None:
+        try:
+            async with sink:
+                async for message in source:
+                    await sink.send(message)
+        finally:
+            self.client_disconnected()
+
+    def _unfinished(self, name: str, state: _CallState, why: str) -> dict[str, Any]:
+        """The envelope for a call that ended without a result."""
+        meta: dict[str, Any] = {"tool": name}
+        error = why
+        if name in WRITE_TOOLS:
+            if state.sent:
+                meta.update(outcome="unknown", request_sent=True)
+                error += f"; {MAY_HAVE_BEEN_APPLIED}"
+            else:
+                meta.update(outcome="not_sent", request_sent=False)
+                error += "; the write was not sent"
+        return _make_result(False, error=error, meta=meta)
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+        tool = self._tool_manager.get_tool(name)
+        if tool is None:
+            return await super().call_tool(name, arguments)  # FastMCP: unknown tool
+        seconds = self._call_timeout()
+        state = _CallState.start(seconds)
+        if self.client_gone:
+            state.cancelled = True
+            envelope = self._unfinished(name, state, "the MCP client disconnected")
+            return self._envelope(tool, envelope)
+        scope = anyio.CancelScope()
+        self._call_scopes.add(scope)
+        try:
+            with scope:
+                return await run_with_deadline(seconds, self._call_tool(name, arguments), state)
         except asyncio.TimeoutError:
             # The backstop: something outside _retry_call did not finish in time.
-            tool = self._tool_manager.get_tool(name)
-            if tool is None:
-                raise
-            error = f"did not finish within the {seconds:g} s deadline (MODBUS_CALL_TIMEOUT)"
-            meta: dict[str, Any] = {"tool": name}
-            if name in WRITE_TOOLS:
-                meta.update(outcome="unknown", request_sent=None)
-                error += f"; {MAY_HAVE_BEEN_APPLIED}"
-            return self._envelope(tool, _make_result(False, error=error, meta=meta))
+            state.cancelled = True
+            why = f"did not finish within the {seconds:g} s deadline (MODBUS_CALL_TIMEOUT)"
+            return self._envelope(tool, self._unfinished(name, state, why))
+        except BaseException:
+            # Cancelled by the client (notifications/cancelled) or anything else that
+            # ends the call without a result: whatever it queued must never be sent.
+            state.cancelled = True
+            raise
+        finally:
+            self._call_scopes.discard(scope)
+        # Only reached when client_disconnected() cancelled this call.
+        state.cancelled = True
+        envelope = self._unfinished(name, state, "the MCP client disconnected before it finished")
+        return self._envelope(tool, envelope)
 
     @staticmethod
     def _envelope(tool: Any, envelope: dict[str, Any]) -> Any:

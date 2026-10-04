@@ -39,8 +39,12 @@ class DropWriteRepliesDevice:
     request, read or write, gets bytes that never form a Modbus frame).
     """
 
-    def __init__(self, write_reply: str | int = "drop") -> None:
+    def __init__(
+        self, write_reply: str | int = "drop", port: int = 0, hold: asyncio.Event | None = None
+    ) -> None:
         self.write_reply = write_reply
+        self.requested_port = port  # 0: a free port
+        self.hold = hold  # while set and not yet triggered, reads get no answer
         self.hr = [0] * 100
         self.co = [False] * 100
         self.received: Counter = Counter()  # (function code, address) -> frames received
@@ -48,7 +52,7 @@ class DropWriteRepliesDevice:
         self.host, self.port = "127.0.0.1", 0
 
     async def __aenter__(self):
-        self.server = await asyncio.start_server(self._serve, self.host, 0)  # free port
+        self.server = await asyncio.start_server(self._serve, self.host, self.requested_port)
         self.port = self.server.sockets[0].getsockname()[1]
         return self
 
@@ -65,6 +69,8 @@ class DropWriteRepliesDevice:
                 tid, _pid, length, unit = struct.unpack(">HHHB", await reader.readexactly(7))
                 pdu = await reader.readexactly(length - 1)
                 reply = self._handle(pdu[0], pdu[1:])
+                if self.hold is not None and pdu[0] in (1, 2, 3, 4):
+                    await self.hold.wait()  # a hung device: the read waits
                 if reply is not None:
                     writer.write(struct.pack(">HHHB", tid, 0, len(reply) + 1, unit) + reply)
                     await writer.drain()
