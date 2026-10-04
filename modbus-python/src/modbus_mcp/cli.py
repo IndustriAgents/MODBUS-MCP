@@ -27,7 +27,7 @@ from pydantic import BeforeValidator, Field, ValidationError
 from pymodbus.client import AsyncModbusSerialClient, AsyncModbusTcpClient, AsyncModbusUdpClient
 from pymodbus.exceptions import ModbusException
 
-from . import codec
+from . import __version__, codec
 from .config import ConfigError, Settings, Tag, load_tag_map
 
 WRITES_DISABLED = (
@@ -447,6 +447,9 @@ mcp = ModbusMCP(
     dependencies=["pymodbus"],
     lifespan=app_lifespan,
 )
+# FastMCP has no version argument and reports the mcp SDK's version in
+# serverInfo.version unless the low-level server is given one.
+mcp._mcp_server.version = __version__
 
 
 # -----------------------------
