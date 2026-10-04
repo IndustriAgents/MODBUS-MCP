@@ -1885,6 +1885,19 @@ def _decimal(value: int | float) -> decimal.Decimal:
     return decimal.Decimal(value) if isinstance(value, int) else decimal.Decimal(repr(value))
 
 
+def _approx(d: decimal.Decimal) -> str:
+    """`d` for a message, to about 20 significant digits, with "..." when digits were
+    cut (1/3 -> 0.33333333333333333333...). Plain notation with at least 3 decimals,
+    or scientific notation above 1e20, beyond any 64-bit value."""
+    if d.adjusted() >= 20:
+        text = f"{d:.19e}"
+    else:
+        text = f"{d:.{max(19 - d.adjusted(), 3)}f}"
+    if decimal.Decimal(text) != d:
+        return text + "..."
+    return text if "e" in text else text.rstrip("0").rstrip(".")
+
+
 def _unscale(values: list[Any], tag: Tag) -> list[Any]:
     """Turn engineering values back into raw values: (value - offset) / scale.
 
@@ -1911,7 +1924,7 @@ def _unscale(values: list[Any], tag: Tag) -> list[Any]:
             elif r != r.to_integral_value():
                 raise codec.CodecError(
                     f"{value!r} is not a whole number of steps of scale {tag.scale}"
-                    f" (offset {tag.offset}); the raw value would be {r.normalize()}"
+                    f" (offset {tag.offset}); the raw value would be {_approx(r)}"
                 )
             else:
                 raw.append(int(r))

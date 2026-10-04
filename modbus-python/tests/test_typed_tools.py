@@ -96,21 +96,24 @@ EXACT = {
     "Offset": {"table": "holding", "address": 40, "dtype": "int32", "offset": 0.5},
     "Tenths": {"table": "holding", "address": 42, "dtype": "uint32", "scale": 0.1},
     "Big": {"table": "holding", "address": 44, "dtype": "int64", "scale": 2},
+    "Thirds": {"table": "holding", "address": 48, "dtype": "int16", "scale": 3},
 }
 
 
 @pytest.mark.parametrize(
-    ("tag", "value"),
+    ("tag", "value", "raw"),
     [
-        ("Offset", 1000000000),  # raw 999999999.5; float math accepted it
-        ("Tenths", 300000000.05),  # raw 3000000000.5; float math rounded it
-        ("Big", 2**60 + 1),  # raw 2**59 + 0.5
+        ("Offset", 1000000000, "999999999.5"),  # float math accepted it
+        ("Tenths", 300000000.05, "3000000000.5"),  # float math rounded it
+        ("Big", 2**60 + 1, "576460752303423488.5"),  # 2**59 + 0.5
+        ("Thirds", 1, "0.33333333333333333333..."),  # cut to about 20 digits
     ],
 )
-def test_write_tag_refuses_values_that_are_not_exact_steps(client, tag, value) -> None:
+def test_write_tag_refuses_values_that_are_not_exact_steps(client, tag, value, raw) -> None:
     ctx = make_ctx(client, EXACT, writes_enabled=True)
     result = run(cli.write_tag(tag, value, ctx))
     assert result["success"] is False and "whole number of steps" in result["error"], result
+    assert result["error"].endswith(f"the raw value would be {raw}"), result["error"]
     assert client.calls == []
 
 
