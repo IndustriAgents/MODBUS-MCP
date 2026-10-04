@@ -17,7 +17,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from pymodbus.exceptions import ConnectionException
+from pymodbus.exceptions import ConnectionException, ModbusIOException
 
 
 class FakeResponse:
@@ -60,7 +60,13 @@ class FakeClient:
         self.ir = [0] * self.SIZE
         self.co = [False] * self.SIZE
         self.di = [False] * self.SIZE
+        # Every request the server tried to make, and the ones that reached the device
+        # (pymodbus raises ConnectionException before sending, so those never do).
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.sent: list[tuple[str, dict[str, Any]]] = []
+        # Apply writes but lose the reply (ModbusIOException), or delay it.
+        self.drop_write_replies = False
+        self.write_reply_delay = 0.0
         self.connected = True
         self.connect_calls = 0
         self.close_calls = 0
@@ -84,6 +90,7 @@ class FakeClient:
             self.before(name)
         if not self.connected:
             raise ConnectionException("Not connected[fake]")
+        self.sent.append((name, kwargs))
         address, count = kwargs.get("address", 0), kwargs.get("count", 1)
         if address < 0 or address + count > self.SIZE:
             return FakeResponse(error=2, function_code=self.FUNCTION_CODES[name])
@@ -122,7 +129,7 @@ class FakeClient:
         err = self._enter("write_register", address=address, value=value, device_id=device_id)
         if not err:
             self.hr[address] = value
-        return err or FakeResponse(function_code=6)
+        return err or await self._reply(FakeResponse(function_code=6))
 
     async def write_registers(self, address, values, *, device_id=1):
         err = self._enter(
@@ -134,13 +141,13 @@ class FakeClient:
         )
         if not err:
             self.hr[address : address + len(values)] = list(values)
-        return err or FakeResponse(function_code=16)
+        return err or await self._reply(FakeResponse(function_code=16))
 
     async def write_coil(self, address, value, *, device_id=1):
         err = self._enter("write_coil", address=address, value=value, device_id=device_id)
         if not err:
             self.co[address] = bool(value)
-        return err or FakeResponse(function_code=5)
+        return err or await self._reply(FakeResponse(function_code=5))
 
     async def write_coils(self, address, values, *, device_id=1):
         err = self._enter(
@@ -148,18 +155,30 @@ class FakeClient:
         )
         if not err:
             self.co[address : address + len(values)] = [bool(v) for v in values]
-        return err or FakeResponse(function_code=15)
+        return err or await self._reply(FakeResponse(function_code=15))
 
     async def mask_write_register(self, *, address=0, and_mask=0xFFFF, or_mask=0, device_id=1):
         err = self._enter("mask_write_register", address=address, device_id=device_id)
         if not err:
             current = self.hr[address]
             self.hr[address] = (current & and_mask) | (or_mask & ~and_mask & 0xFFFF)
-        return err or FakeResponse(function_code=22)
+        return err or await self._reply(FakeResponse(function_code=22))
+
+    async def _reply(self, response: FakeResponse) -> FakeResponse:
+        """A write reached the device and was applied; now the reply may get lost."""
+        if self.write_reply_delay:
+            await asyncio.sleep(self.write_reply_delay)
+        if self.drop_write_replies:
+            raise ModbusIOException("No response received after 0 retries")
+        return response
 
     @property
     def writes(self) -> list[str]:
         return [name for name, _ in self.calls if name.startswith(("write", "mask"))]
+
+    @property
+    def sent_writes(self) -> list[str]:
+        return [name for name, _ in self.sent if name.startswith(("write", "mask"))]
 
 
 class FakeContext:

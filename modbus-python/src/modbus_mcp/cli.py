@@ -25,7 +25,7 @@ from mcp.server.fastmcp.prompts import base
 from mcp.types import TextContent
 from pydantic import BeforeValidator, Field, ValidationError
 from pymodbus.client import AsyncModbusSerialClient, AsyncModbusTcpClient, AsyncModbusUdpClient
-from pymodbus.exceptions import ModbusException
+from pymodbus.exceptions import ConnectionException, ModbusException
 
 from . import __version__, codec
 from .config import ConfigError, Settings, Tag, load_tag_map
@@ -33,6 +33,8 @@ from .config import ConfigError, Settings, Tag, load_tag_map
 WRITES_DISABLED = (
     "Writes are disabled by configuration (set MODBUS_WRITES_ENABLED=true to allow them)"
 )
+# A write request went out but no reply came back. It is never sent again.
+WRITE_NO_REPLY = "no reply; the write may have been applied"
 
 # Modbus protocol limits per request (Modbus Application Protocol v1.1b3).
 MAX_READ_REGISTERS = 125
@@ -219,6 +221,9 @@ async def _retry_call(
     op: str,
     call_factory: Callable[[], Awaitable[Any]],
     max_retries: int | None = None,
+    *,
+    write: bool = False,
+    details: dict[str, Any] | None = None,
 ) -> tuple[Any | None, str | None, float, int]:
     """Execute call with retries and timeout. Returns (result, error, duration, attempts).
 
@@ -226,45 +231,77 @@ async def _retry_call(
     ModbusException, rather than ConnectionError/OSError), reconnect before the
     first attempt and before each retry, so a dropped TCP session or a restarted
     device does not need a server restart.
+
+    A read that fails is retried up to `max_retries` times. A write is sent at
+    most once (`write=True`): only attempts that sent nothing - the connection
+    could not be opened, or pymodbus raised ConnectionException, which it does
+    before sending - are retried. Once a write has gone out, a missing or late
+    reply returns WRITE_NO_REPLY; sending it again could apply it twice. (The
+    pymodbus client is created with retries=0 for the same reason; see
+    _make_client.) The underlying error, if any, goes to `details["cause"]`.
     """
     settings = app.settings
     client = app.modbus_client
     if max_retries is None:
         max_retries = settings.max_retries
+    details = {} if details is None else details
     attempt = 0
     start = time.perf_counter()
     last_err: str | None = None
-    while True:
-        if not getattr(client, "connected", True):
-            await _reconnect(ctx, app, op)
+
+    def elapsed_ms() -> float:
+        return (time.perf_counter() - start) * 1000.0
+
+    while attempt <= max_retries:
+        attempt += 1
+        if attempt > 1:
+            await asyncio.sleep(settings.retry_backoff_base * (2 ** (attempt - 2)))
+        if not getattr(client, "connected", True) and not await _reconnect(ctx, app, op):
+            last_err = f"cannot reach device at {settings.target}"
+            continue
         try:
-            attempt += 1
             result = await _with_timeout(call_factory(), settings.tool_timeout)
-            return result, None, (time.perf_counter() - start) * 1000.0, attempt
+            return result, None, elapsed_ms(), attempt
+        except ConnectionException as e:
+            # Raised before anything is sent, so retrying cannot repeat a write.
+            last_err = f"cannot reach device at {settings.target}"
+            details["cause"] = f"{type(e).__name__}: {e}"
+            await ctx.error(f"{op} failed on attempt {attempt}: {details['cause']}")
         except (ModbusException, asyncio.TimeoutError, ConnectionError, OSError) as e:
-            last_err = f"{type(e).__name__}: {e}"
-            await ctx.error(f"{op} failed on attempt {attempt}: {last_err}")
-            if attempt > max_retries:
-                break
-            backoff = settings.retry_backoff_base * (2 ** (attempt - 1))
-            await asyncio.sleep(backoff)
+            cause = f"{type(e).__name__}: {e}"
+            await ctx.error(f"{op} failed on attempt {attempt}: {cause}")
+            if write:
+                details["cause"] = cause
+                return None, WRITE_NO_REPLY, elapsed_ms(), attempt
+            last_err = cause
         except Exception as e:  # unexpected
             last_err = f"Unexpected {type(e).__name__}: {e}"
             await ctx.error(f"{op} unexpected error on attempt {attempt}: {last_err}")
             break
-    return None, last_err, (time.perf_counter() - start) * 1000.0, attempt
+    return None, last_err, elapsed_ms(), attempt
 
 
 async def _request(
-    ctx: Context, app: AppContext, op: str, call: Callable[[], Awaitable[Any]], meta: dict
+    ctx: Context,
+    app: AppContext,
+    op: str,
+    call: Callable[[], Awaitable[Any]],
+    meta: dict,
+    *,
+    write: bool = False,
 ) -> tuple[Any, dict[str, Any] | None]:
     """One request with retries. Returns (response, None) or (None, failure envelope).
 
-    Adds duration_ms and attempts to `meta` in place.
+    Adds duration_ms and attempts (and the cause of a failure) to `meta` in place.
+    `write=True` sends the request at most once (see _retry_call).
     """
-    result, err, duration_ms, attempts = await _retry_call(ctx, app, op, call)
+    details: dict[str, Any] = {}
+    result, err, duration_ms, attempts = await _retry_call(
+        ctx, app, op, call, write=write, details=details
+    )
     meta.update(duration_ms=round(duration_ms, 3), attempts=attempts)
     if err is not None:
+        meta.update(details)
         return None, _make_result(False, error=err, meta=meta)
     if _is_error(result):
         message, extra = _device_error(result)
@@ -303,11 +340,12 @@ async def _chunked_read(
     while remaining > 0:
         size = min(remaining, per_request_limit)
         op = f"{label}[{current}:{current + size - 1}]"
+        details: dict[str, Any] = {}
         result, err, duration_ms, attempts = await _retry_call(
-            ctx, app, op, functools.partial(read_func, current, size)
+            ctx, app, op, functools.partial(read_func, current, size), details=details
         )
         if err is not None:
-            return None, err, {"partial": values, "chunks": chunks}
+            return None, err, {"partial": values, "chunks": chunks, **details}
         if _is_error(result):
             message, extra = _device_error(result)
             return None, message, {"partial": values, "chunks": chunks, **extra}
@@ -363,10 +401,13 @@ def _apply_scale(values: list[Any], scale: float, offset: float) -> list[Any]:
 
 
 def _make_client(settings: Settings) -> Any:
+    # retries=0: on a timeout, pymodbus (3.9-3.15, default retries=3) sends the
+    # same request again, which would repeat a write. Reads are retried by
+    # _retry_call instead (MODBUS_MAX_RETRIES); writes are never re-sent.
     if settings.modbus_type == "tcp":
-        return AsyncModbusTcpClient(host=settings.host, port=settings.port)
+        return AsyncModbusTcpClient(host=settings.host, port=settings.port, retries=0)
     if settings.modbus_type == "udp":
-        return AsyncModbusUdpClient(host=settings.host, port=settings.port)
+        return AsyncModbusUdpClient(host=settings.host, port=settings.port, retries=0)
     return AsyncModbusSerialClient(
         port=settings.serial_port,
         baudrate=settings.baudrate,
@@ -374,6 +415,7 @@ def _make_client(settings: Settings) -> Any:
         stopbits=settings.stopbits,
         bytesize=settings.bytesize,
         timeout=settings.serial_timeout,
+        retries=0,
     )
 
 
@@ -504,7 +546,7 @@ async def write_register(
         return await client.write_register(address=address, value=value, **_unit(client, slave_id))
 
     op = f"write_register addr={address} value={value} slave={slave_id}"
-    _, failure = await _request(ctx, app, op, _call, meta)
+    _, failure = await _request(ctx, app, op, _call, meta, write=True)
     if failure:
         return failure
     await ctx.info(f"Wrote {value} to register {address} on slave {slave_id}")
@@ -562,7 +604,7 @@ async def write_coil(
         return await client.write_coil(address=address, value=value, **_unit(client, slave_id))
 
     op = f"write_coil addr={address} value={value} slave={slave_id}"
-    _, failure = await _request(ctx, app, op, _call, meta)
+    _, failure = await _request(ctx, app, op, _call, meta, write=True)
     if failure:
         return failure
     await ctx.info(f"Wrote {value} to coil {address} on slave {slave_id}")
@@ -734,7 +776,7 @@ async def write_registers(
         )
 
     op = f"write_registers addr={address} n={len(values)} slave={slave_id}"
-    _, failure = await _request(ctx, app, op, _call, meta)
+    _, failure = await _request(ctx, app, op, _call, meta, write=True)
     if failure:
         return failure
     await ctx.info(f"Wrote {len(values)} registers starting at {address} on slave {slave_id}")
@@ -778,7 +820,7 @@ async def write_coils_bulk(
         return await client.write_coils(address=address, values=values, **_unit(client, slave_id))
 
     op = f"write_coils addr={address} n={len(values)} slave={slave_id}"
-    _, failure = await _request(ctx, app, op, _call, meta)
+    _, failure = await _request(ctx, app, op, _call, meta, write=True)
     if failure:
         return failure
     await ctx.info(f"Wrote {len(values)} coils starting at {address} on slave {slave_id}")
@@ -817,7 +859,7 @@ async def mask_write_register(
         )
 
     op = f"mask_write_register addr={address} and={and_mask} or={or_mask} slave={slave_id}"
-    _, failure = await _request(ctx, app, op, _call, meta)
+    _, failure = await _request(ctx, app, op, _call, meta, write=True)
     if failure:
         return failure
     await ctx.info(f"Mask write register {address} on slave {slave_id}")

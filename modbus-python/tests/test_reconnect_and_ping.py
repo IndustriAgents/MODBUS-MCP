@@ -52,8 +52,9 @@ def test_failed_reconnect_is_reported_not_hidden(client) -> None:
     client.connect = refuse
     result = run(cli.read_register(0, ctx))
     assert result["success"] is False
-    assert "ConnectionException" in result["error"]
+    assert result["error"] == "cannot reach device at 127.0.0.1:502"
     assert client.connect_calls == 2  # once before each attempt
+    assert client.calls == []  # nothing is sent while there is no connection
     assert any("reconnect to" in m and "failed" in m for level, m in ctx.logs if level == "error")
 
 
