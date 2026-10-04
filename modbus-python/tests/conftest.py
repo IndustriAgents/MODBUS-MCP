@@ -233,7 +233,7 @@ class MockDevice:
         return self.log_path.read_text(errors="replace")
 
 
-def _stop(process: subprocess.Popen) -> None:
+def stop_process(process: subprocess.Popen) -> None:
     if process.poll() is not None:
         return
     # `uv run` starts the mock as a child; signal the whole process group.
@@ -254,12 +254,12 @@ def _stop(process: subprocess.Popen) -> None:
 
 
 @contextlib.contextmanager
-def running_mock(log_dir: Path, update_interval: float = 0.2):
-    """Start modbus-mock-server (in its own uv project) on a free port; stop it afterwards."""
+def running_mock(log_dir: Path, update_interval: float = 0.2, port: int | None = None):
+    """Start modbus-mock-server (in its own uv project) on `port` or a free port; stop it after."""
     uv = shutil.which("uv")
     if uv is None:
         pytest.skip("uv is needed to run the mock device (modbus-mock-server is its own uv project)")
-    port = free_port()
+    port = port or free_port()
     env = {
         **os.environ,
         "MODBUS_HOST": "127.0.0.1",
@@ -292,4 +292,4 @@ def running_mock(log_dir: Path, update_interval: float = 0.2):
                 time.sleep(0.2)
         yield device
     finally:
-        _stop(process)
+        stop_process(process)
