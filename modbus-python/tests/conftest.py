@@ -33,6 +33,18 @@ class FakeClient:
     """
 
     SIZE = 100
+    FUNCTION_CODES = {
+        "read_coils": 1,
+        "read_discrete_inputs": 2,
+        "read_holding_registers": 3,
+        "read_input_registers": 4,
+        "write_coil": 5,
+        "write_register": 6,
+        "write_coils": 15,
+        "write_registers": 16,
+        "mask_write_register": 22,
+        "read_device_information": 43,
+    }
 
     def __init__(self) -> None:
         self.hr = [0] * self.SIZE
@@ -65,7 +77,7 @@ class FakeClient:
             raise ConnectionException("Not connected[fake]")
         address, count = kwargs.get("address", 0), kwargs.get("count", 1)
         if address < 0 or address + count > self.SIZE:
-            return FakeResponse(error=2)
+            return FakeResponse(error=2, function_code=self.FUNCTION_CODES[name])
         return None
 
     # --- reads ------------------------------------------------------------

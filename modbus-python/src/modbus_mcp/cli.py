@@ -9,17 +9,21 @@ diagnostics go to stderr (logging) or to the client as MCP log messages.
 import asyncio
 import functools
 import inspect
+import json
 import math
 import sys
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Annotated, Any, Literal
 
 from dotenv import load_dotenv
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.fastmcp.prompts import base
+from mcp.types import TextContent
+from pydantic import BeforeValidator, Field, ValidationError
 from pymodbus.client import AsyncModbusSerialClient, AsyncModbusTcpClient, AsyncModbusUdpClient
 from pymodbus.exceptions import ModbusException
 
@@ -29,6 +33,75 @@ from .config import ConfigError, Settings, Tag, load_tag_map
 WRITES_DISABLED = (
     "Writes are disabled by configuration (set MODBUS_WRITES_ENABLED=true to allow them)"
 )
+
+# Modbus protocol limits per request (Modbus Application Protocol v1.1b3).
+MAX_READ_REGISTERS = 125
+MAX_READ_BITS = 2000
+MAX_WRITE_REGISTERS = 123
+MAX_WRITE_COILS = 1968
+ADDRESS_SPACE = 65536
+
+_EXCEPTION_NAMES = {
+    1: "Illegal Function",
+    2: "Illegal Data Address",
+    3: "Illegal Data Value",
+    4: "Server Device Failure",
+    5: "Acknowledge",
+    6: "Server Device Busy",
+    8: "Memory Parity Error",
+    10: "Gateway Path Unavailable",
+    11: "Gateway Target Device Failed to Respond",
+}
+
+
+# -----------------------------
+# Argument types (they become the tools' JSON Schema)
+# -----------------------------
+
+
+def _reject_bool(value: Any) -> Any:
+    # pydantic's lax mode turns true/false into 1/0 for an int; for a register
+    # address or value that would quietly read or write the wrong thing.
+    if isinstance(value, bool):
+        raise ValueError("expected an integer, not a boolean")
+    return value
+
+
+def _int(lo: int, hi: int, description: str) -> Any:
+    # Field before the validator, so the bounds stay standard JSON Schema (minimum/maximum).
+    return Annotated[
+        int, Field(ge=lo, le=hi, description=description), BeforeValidator(_reject_bool)
+    ]
+
+
+Address = _int(0, 65535, "Zero-based Modbus address (0-65535).")
+RegisterValue = _int(0, 65535, "Unsigned 16-bit register value (0-65535).")
+Mask = _int(0, 65535, "16-bit mask (0-65535).")
+RegisterCount = _int(1, ADDRESS_SPACE, "Number of registers to read (at least 1).")
+BitCount = _int(1, ADDRESS_SPACE, "Number of bits to read (at least 1).")
+TypedCount = _int(1, ADDRESS_SPACE, "Number of typed values to decode (at least 1).")
+SlaveId = Annotated[
+    Annotated[int, Field(ge=0, le=255), BeforeValidator(_reject_bool)] | None,
+    Field(description="Modbus unit/slave ID (0-255); omit to use MODBUS_DEFAULT_SLAVE_ID."),
+]
+DType = Annotated[
+    Literal["int16", "uint16", "int32", "uint32", "int64", "uint64", "float32", "float64"],
+    Field(description="Value type; 16-bit types use 1 register, 32-bit 2, 64-bit 4."),
+]
+ByteOrder = Annotated[
+    Literal["big", "little"],
+    Field(description="Byte order inside each register ('big' is the Modbus default)."),
+]
+WordOrder = Annotated[
+    Literal["big", "little"],
+    Field(description="Register order for values wider than 16 bits ('big' = high word first)."),
+]
+Scale = Annotated[
+    float, Field(allow_inf_nan=False, description="Multiply each decoded value by this.")
+]
+Offset = Annotated[
+    float, Field(allow_inf_nan=False, description="Then add this to each decoded value.")
+]
 
 
 @dataclass
@@ -81,6 +154,30 @@ def _app(ctx: Context) -> AppContext:
 
 def _slave(app: AppContext, slave_id: int | None) -> int:
     return app.settings.default_slave_id if slave_id is None else slave_id
+
+
+def _is_error(result: Any) -> bool:
+    return bool(hasattr(result, "isError") and result.isError())
+
+
+def _device_error(result: Any) -> tuple[str, dict[str, Any]]:
+    """Describe a Modbus exception response, e.g. 'Modbus exception 2 (Illegal Data Address)'."""
+    code = getattr(result, "exception_code", None)
+    if not isinstance(code, int) or not code:
+        return f"Device error: {result}", {}
+    message = f"Modbus exception {code}"
+    if code in _EXCEPTION_NAMES:
+        message += f" ({_EXCEPTION_NAMES[code]})"
+    function_code = getattr(result, "function_code", None)
+    if isinstance(function_code, int):
+        message += f" for function 0x{function_code & 0x7F:02X}"
+    return message, {"exception_code": code}
+
+
+def _span_error(address: int, span: int) -> str | None:
+    if address + span > ADDRESS_SPACE:
+        return f"address {address} + {span} runs past the last Modbus address (65535)"
+    return None
 
 
 async def _with_timeout(coro: Awaitable[Any], timeout: float | None) -> Any:
@@ -140,6 +237,24 @@ async def _retry_call(
     return None, last_err, (time.perf_counter() - start) * 1000.0, attempt
 
 
+async def _request(
+    ctx: Context, app: AppContext, op: str, call: Callable[[], Awaitable[Any]], meta: dict
+) -> tuple[Any, dict[str, Any] | None]:
+    """One request with retries. Returns (response, None) or (None, failure envelope).
+
+    Adds duration_ms and attempts to `meta` in place.
+    """
+    result, err, duration_ms, attempts = await _retry_call(ctx, app, op, call)
+    meta.update(duration_ms=round(duration_ms, 3), attempts=attempts)
+    if err is not None:
+        return None, _make_result(False, error=err, meta=meta)
+    if _is_error(result):
+        message, extra = _device_error(result)
+        meta.update(extra)
+        return None, _make_result(False, error=message, meta=meta)
+    return result, None
+
+
 async def _chunked_read(
     ctx: Context,
     app: AppContext,
@@ -154,9 +269,14 @@ async def _chunked_read(
 
     - read_func: async function(start, size) -> pymodbus response
     - attr: response attribute to extract ("registers" or "bits")
+
+    On failure the values read so far are returned in meta["partial"].
     """
     if total_count <= 0:
         return None, "Count must be positive", {}
+    span_error = _span_error(start_address, total_count)
+    if span_error:
+        return None, span_error, {}
 
     values: list[Any] = []
     chunks: list[dict[str, Any]] = []
@@ -170,11 +290,12 @@ async def _chunked_read(
         )
         if err is not None:
             return None, err, {"partial": values, "chunks": chunks}
-        if hasattr(result, "isError") and result.isError():
-            return None, f"Device error: {result}", {"partial": values, "chunks": chunks}
+        if _is_error(result):
+            message, extra = _device_error(result)
+            return None, message, {"partial": values, "chunks": chunks, **extra}
         chunk_vals = getattr(result, attr, None)
-        if chunk_vals is None:
-            return None, "Malformed response", {"partial": values, "chunks": chunks}
+        if chunk_vals is None or len(chunk_vals) < size:
+            return None, "Malformed response from device", {"partial": values, "chunks": chunks}
         # trim to the requested size: bit responses are padded to a multiple of 8
         values.extend(list(chunk_vals)[:size])
         chunks.append(
@@ -255,7 +376,59 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
         client.close()
 
 
-mcp = FastMCP(name="Modbus MCP Server", dependencies=["pymodbus"], lifespan=app_lifespan)
+def _describe_validation_error(exc: ValidationError) -> str:
+    parts = []
+    for err in exc.errors():
+        where = ".".join(str(p) for p in err.get("loc", ())) or "arguments"
+        part = f"{where}: {err.get('msg', 'invalid')}"
+        if err.get("type") != "missing" and "input" in err:
+            part += f" (got {err['input']!r})"
+        parts.append(part)
+    return "; ".join(parts)
+
+
+class ModbusMCP(FastMCP):
+    """FastMCP that returns the {success, data, error, meta} envelope for every tool failure.
+
+    FastMCP turns invalid arguments (and any exception a tool raises) into a bare
+    error string. Clients of IndustriConnect servers parse the envelope, so give
+    them one: success=false with the reason in `error`.
+    """
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+        try:
+            return await super().call_tool(name, arguments)
+        except ToolError as exc:
+            tool = self._tool_manager.get_tool(name)
+            if tool is None:  # unknown tool: a protocol-level error, not a tool result
+                raise
+            cause = exc.__cause__
+            if isinstance(cause, ValidationError):
+                error = f"Invalid arguments: {_describe_validation_error(cause)}"
+            elif cause is not None:
+                error = f"Unexpected {type(cause).__name__}: {cause}"
+            else:
+                error = str(exc)
+            envelope = _make_result(False, error=error, meta={"tool": name})
+            # mcp >= 1.10 also returns structured content; let the tool's own
+            # converter shape the envelope exactly like a normal result.
+            convert = getattr(getattr(tool, "fn_metadata", None), "convert_result", None)
+            if convert is not None:
+                return convert(envelope)
+            return [TextContent(type="text", text=json.dumps(envelope))]
+
+
+mcp = ModbusMCP(
+    name="Modbus MCP Server",
+    instructions=(
+        "Tools for one Modbus device. Every tool returns {success, data, error, meta}; "
+        "check success before using data. Addresses are zero-based (holding register "
+        "40001 is address 0). Write tools only work when the server was started with "
+        "MODBUS_WRITES_ENABLED=true."
+    ),
+    dependencies=["pymodbus"],
+    lifespan=app_lifespan,
+)
 
 
 # -----------------------------
@@ -264,98 +437,66 @@ mcp = FastMCP(name="Modbus MCP Server", dependencies=["pymodbus"], lifespan=app_
 
 
 @mcp.tool()
-async def read_register(address: int, ctx: Context, slave_id: int | None = None) -> dict[str, Any]:
-    """
-    Read a single Modbus holding register.
-
-    Parameters:
-        address (int): The address of the holding register (0-65535).
-        slave_id (int): The Modbus slave ID (device ID); defaults to MODBUS_DEFAULT_SLAVE_ID.
-    """
+async def read_register(address: Address, ctx: Context, slave_id: SlaveId = None) -> dict[str, Any]:
+    """Read one holding register (function 3); data.value is its raw 16-bit value."""
     app = _app(ctx)
     client = app.modbus_client
     slave_id = _slave(app, slave_id)
-    op = f"read_register addr={address} slave={slave_id}"
+    meta: dict[str, Any] = {"address": address, "slave_id": slave_id}
 
     async def _call():
         return await client.read_holding_registers(
             address=address, count=1, **_unit(client, slave_id)
         )
 
-    result, err, duration_ms, attempts = await _retry_call(ctx, app, op, _call)
-    meta = {"address": address, "slave_id": slave_id}
-    if err is not None:
-        meta.update(duration_ms=round(duration_ms, 3), attempts=attempts)
-        return _make_result(False, error=err, meta=meta)
-    if hasattr(result, "isError") and result.isError():
-        return _make_result(False, error=str(result), meta=meta)
+    result, failure = await _request(
+        ctx, app, f"read_register addr={address} slave={slave_id}", _call, meta
+    )
+    if failure:
+        return failure
+    if not getattr(result, "registers", None):
+        return _make_result(False, error="Malformed response from device", meta=meta)
     value = result.registers[0]
     await ctx.info(f"Read register {address} from slave {slave_id}: {value}")
-    meta.update(duration_ms=round(duration_ms, 3), attempts=attempts)
     return _make_result(True, data={"value": value}, meta=meta)
 
 
 @mcp.tool()
 async def write_register(
-    address: int, value: int, ctx: Context, slave_id: int | None = None
+    address: Address, value: RegisterValue, ctx: Context, slave_id: SlaveId = None
 ) -> dict[str, Any]:
-    """
-    Write a value to a Modbus holding register.
+    """Write one holding register (function 6).
 
-    Parameters:
-        address (int): The address of the holding register (0-65535).
-        value (int): The value to write (0-65535).
-        slave_id (int): The Modbus slave ID (device ID); defaults to MODBUS_DEFAULT_SLAVE_ID.
+    Only works when MODBUS_WRITES_ENABLED=true; otherwise nothing is sent and
+    success is false.
     """
     app = _app(ctx)
     slave_id = _slave(app, slave_id)
+    meta: dict[str, Any] = {"address": address, "value": value, "slave_id": slave_id}
     if not app.settings.writes_enabled:
-        return _make_result(
-            False, error=WRITES_DISABLED, meta={"address": address, "slave_id": slave_id}
-        )
+        return _make_result(False, error=WRITES_DISABLED, meta=meta)
     if not (0 <= value <= 65535):
-        return _make_result(
-            False,
-            error=f"Value {value} out of uint16 range (0-65535)",
-            meta={"address": address, "value": value},
-        )
+        return _make_result(False, error=f"Value {value} out of uint16 range (0-65535)", meta=meta)
     client = app.modbus_client
-    op = f"write_register addr={address} value={value} slave={slave_id}"
 
     async def _call():
         return await client.write_register(address=address, value=value, **_unit(client, slave_id))
 
-    result, err, duration_ms, attempts = await _retry_call(ctx, app, op, _call)
-    meta = {"address": address, "value": value, "slave_id": slave_id}
-    if err is not None:
-        meta.update(duration_ms=round(duration_ms, 3), attempts=attempts)
-        return _make_result(False, error=err, meta=meta)
-    if hasattr(result, "isError") and result.isError():
-        return _make_result(False, error=str(result), meta=meta)
+    op = f"write_register addr={address} value={value} slave={slave_id}"
+    _, failure = await _request(ctx, app, op, _call, meta)
+    if failure:
+        return failure
     await ctx.info(f"Wrote {value} to register {address} on slave {slave_id}")
-    return _make_result(
-        True,
-        data={"written": value},
-        meta={
-            "address": address,
-            "slave_id": slave_id,
-            "duration_ms": round(duration_ms, 3),
-            "attempts": attempts,
-        },
-    )
+    return _make_result(True, data={"written": value}, meta=meta)
 
 
 @mcp.tool()
 async def read_coils(
-    address: int, count: int, ctx: Context, slave_id: int | None = None
+    address: Address, count: BitCount, ctx: Context, slave_id: SlaveId = None
 ) -> dict[str, Any]:
-    """
-    Read the status of multiple Modbus coils.
+    """Read coils (function 1); data.values is a list of booleans.
 
-    Parameters:
-        address (int): The starting address of the coils (0-65535).
-        count (int): The number of coils to read; split into requests of at most 2000.
-        slave_id (int): The Modbus slave ID (device ID); defaults to MODBUS_DEFAULT_SLAVE_ID.
+    Counts above 2000 are split into several requests.
     """
     app = _app(ctx)
     client = app.modbus_client
@@ -367,7 +508,7 @@ async def read_coils(
         lambda start, size: client.read_coils(address=start, count=size, **_unit(client, slave_id)),
         address,
         count,
-        2000,
+        MAX_READ_BITS,
         "bits",
     )
     meta = {"address": address, "count": count, "slave_id": slave_id, **meta}
@@ -379,59 +520,41 @@ async def read_coils(
 
 @mcp.tool()
 async def write_coil(
-    address: int, value: bool, ctx: Context, slave_id: int | None = None
+    address: Address,
+    value: Annotated[bool, Field(description="true = ON, false = OFF.")],
+    ctx: Context,
+    slave_id: SlaveId = None,
 ) -> dict[str, Any]:
-    """
-    Write a value to a single Modbus coil.
+    """Write one coil (function 5).
 
-    Parameters:
-        address (int): The address of the coil (0-65535).
-        value (bool): The value to write (True for ON, False for OFF).
-        slave_id (int): The Modbus slave ID (device ID); defaults to MODBUS_DEFAULT_SLAVE_ID.
+    Only works when MODBUS_WRITES_ENABLED=true; otherwise nothing is sent and
+    success is false.
     """
     app = _app(ctx)
     slave_id = _slave(app, slave_id)
+    meta: dict[str, Any] = {"address": address, "value": value, "slave_id": slave_id}
     if not app.settings.writes_enabled:
-        return _make_result(
-            False, error=WRITES_DISABLED, meta={"address": address, "slave_id": slave_id}
-        )
+        return _make_result(False, error=WRITES_DISABLED, meta=meta)
     client = app.modbus_client
-    op = f"write_coil addr={address} value={value} slave={slave_id}"
 
     async def _call():
         return await client.write_coil(address=address, value=value, **_unit(client, slave_id))
 
-    result, err, duration_ms, attempts = await _retry_call(ctx, app, op, _call)
-    meta = {"address": address, "value": value, "slave_id": slave_id}
-    if err is not None:
-        meta.update(duration_ms=round(duration_ms, 3), attempts=attempts)
-        return _make_result(False, error=err, meta=meta)
-    if hasattr(result, "isError") and result.isError():
-        return _make_result(False, error=str(result), meta=meta)
+    op = f"write_coil addr={address} value={value} slave={slave_id}"
+    _, failure = await _request(ctx, app, op, _call, meta)
+    if failure:
+        return failure
     await ctx.info(f"Wrote {value} to coil {address} on slave {slave_id}")
-    return _make_result(
-        True,
-        data={"written": value},
-        meta={
-            "address": address,
-            "slave_id": slave_id,
-            "duration_ms": round(duration_ms, 3),
-            "attempts": attempts,
-        },
-    )
+    return _make_result(True, data={"written": value}, meta=meta)
 
 
 @mcp.tool()
 async def read_input_registers(
-    address: int, count: int, ctx: Context, slave_id: int | None = None
+    address: Address, count: RegisterCount, ctx: Context, slave_id: SlaveId = None
 ) -> dict[str, Any]:
-    """
-    Read multiple Modbus input registers.
+    """Read input registers (function 4); data.registers is a list of raw 16-bit values.
 
-    Parameters:
-        address (int): The starting address of the input registers (0-65535).
-        count (int): The number of registers to read; split into requests of at most 125.
-        slave_id (int): The Modbus slave ID (device ID); defaults to MODBUS_DEFAULT_SLAVE_ID.
+    Counts above 125 are split into several requests.
     """
     app = _app(ctx)
     client = app.modbus_client
@@ -445,7 +568,7 @@ async def read_input_registers(
         ),
         address,
         count,
-        125,
+        MAX_READ_REGISTERS,
         "registers",
     )
     meta = {"address": address, "count": count, "slave_id": slave_id, **meta}
@@ -457,15 +580,11 @@ async def read_input_registers(
 
 @mcp.tool()
 async def read_multiple_holding_registers(
-    address: int, count: int, ctx: Context, slave_id: int | None = None
+    address: Address, count: RegisterCount, ctx: Context, slave_id: SlaveId = None
 ) -> dict[str, Any]:
-    """
-    Read multiple Modbus holding registers.
+    """Read holding registers (function 3); data.registers is a list of raw 16-bit values.
 
-    Parameters:
-        address (int): The starting address of the holding registers (0-65535).
-        count (int): The number of registers to read; split into requests of at most 125.
-        slave_id (int): The Modbus slave ID (device ID); defaults to MODBUS_DEFAULT_SLAVE_ID.
+    Counts above 125 are split into several requests.
     """
     app = _app(ctx)
     client = app.modbus_client
@@ -479,7 +598,7 @@ async def read_multiple_holding_registers(
         ),
         address,
         count,
-        125,
+        MAX_READ_REGISTERS,
         "registers",
     )
     meta = {"address": address, "count": count, "slave_id": slave_id, **meta}
@@ -489,7 +608,6 @@ async def read_multiple_holding_registers(
     return _make_result(True, data={"registers": values}, meta=meta)
 
 
-# Prompts: Templates for Modbus interactions
 @mcp.prompt()
 def analyze_register(value: str) -> list[base.Message]:
     """Prompt to analyze a Modbus register value."""
@@ -521,15 +639,11 @@ def main() -> None:
 
 @mcp.tool()
 async def read_discrete_inputs(
-    address: int, count: int, ctx: Context, slave_id: int | None = None
+    address: Address, count: BitCount, ctx: Context, slave_id: SlaveId = None
 ) -> dict[str, Any]:
-    """
-    Read multiple Modbus discrete inputs (function 2).
+    """Read discrete inputs (function 2); data.values is a list of booleans.
 
-    Parameters:
-        address (int): Starting address (0-65535)
-        count (int): Number of inputs to read (1+)
-        slave_id (int): Device ID; defaults to MODBUS_DEFAULT_SLAVE_ID.
+    Counts above 2000 are split into several requests.
     """
     app = _app(ctx)
     client = app.modbus_client
@@ -543,7 +657,7 @@ async def read_discrete_inputs(
         ),
         address,
         count,
-        2000,
+        MAX_READ_BITS,
         "bits",
     )
     meta = {"address": address, "count": count, "slave_id": slave_id, **meta}
@@ -555,167 +669,183 @@ async def read_discrete_inputs(
 
 @mcp.tool()
 async def write_registers(
-    address: int, values: list[int], ctx: Context, slave_id: int | None = None
+    address: Address,
+    values: Annotated[
+        list[RegisterValue],
+        Field(
+            min_length=1,
+            max_length=MAX_WRITE_REGISTERS,
+            description="1-123 register values (0-65535 each), written from `address` up.",
+        ),
+    ],
+    ctx: Context,
+    slave_id: SlaveId = None,
 ) -> dict[str, Any]:
-    """
-    Write multiple holding registers (function 16).
+    """Write consecutive holding registers in one request (function 16).
 
-    Parameters:
-        address (int): Starting address
-        values (List[int]): Register values
-        slave_id (int): Device ID; defaults to MODBUS_DEFAULT_SLAVE_ID.
+    Only works when MODBUS_WRITES_ENABLED=true; otherwise nothing is sent and
+    success is false.
     """
     app = _app(ctx)
     slave_id = _slave(app, slave_id)
+    meta: dict[str, Any] = {"address": address, "count": len(values), "slave_id": slave_id}
     if not app.settings.writes_enabled:
+        return _make_result(False, error=WRITES_DISABLED, meta=meta)
+    if not values or len(values) > MAX_WRITE_REGISTERS:
         return _make_result(
-            False, error=WRITES_DISABLED, meta={"address": address, "slave_id": slave_id}
+            False, error=f"Write 1 to {MAX_WRITE_REGISTERS} registers per request", meta=meta
         )
-    if not values:
-        return _make_result(False, error="Values list must not be empty")
     for i, v in enumerate(values):
         if not (0 <= v <= 65535):
             return _make_result(
                 False,
                 error=f"Value {v} at index {i} out of uint16 range (0-65535)",
-                meta={"address": address, "index": i, "value": v},
+                meta={**meta, "index": i, "value": v},
             )
+    span_error = _span_error(address, len(values))
+    if span_error:
+        return _make_result(False, error=span_error, meta=meta)
     client = app.modbus_client
-    op = f"write_registers addr={address} n={len(values)} slave={slave_id}"
 
     async def _call():
         return await client.write_registers(
             address=address, values=values, **_unit(client, slave_id)
         )
 
-    result, err, duration_ms, attempts = await _retry_call(ctx, app, op, _call)
-    meta = {"address": address, "count": len(values), "slave_id": slave_id}
-    if err is not None:
-        meta.update(duration_ms=round(duration_ms, 3), attempts=attempts)
-        return _make_result(False, error=err, meta=meta)
-    if hasattr(result, "isError") and result.isError():
-        return _make_result(False, error=str(result), meta=meta)
+    op = f"write_registers addr={address} n={len(values)} slave={slave_id}"
+    _, failure = await _request(ctx, app, op, _call, meta)
+    if failure:
+        return failure
     await ctx.info(f"Wrote {len(values)} registers starting at {address} on slave {slave_id}")
-    return _make_result(
-        True,
-        data={"written": len(values)},
-        meta={
-            "address": address,
-            "slave_id": slave_id,
-            "duration_ms": round(duration_ms, 3),
-            "attempts": attempts,
-        },
-    )
+    return _make_result(True, data={"written": len(values)}, meta=meta)
 
 
 @mcp.tool()
 async def write_coils_bulk(
-    address: int, values: list[bool], ctx: Context, slave_id: int | None = None
+    address: Address,
+    values: Annotated[
+        list[bool],
+        Field(
+            min_length=1,
+            max_length=MAX_WRITE_COILS,
+            description="1-1968 coil states, written from `address` up.",
+        ),
+    ],
+    ctx: Context,
+    slave_id: SlaveId = None,
 ) -> dict[str, Any]:
-    """
-    Write multiple coils (function 15).
+    """Write consecutive coils in one request (function 15).
+
+    Only works when MODBUS_WRITES_ENABLED=true; otherwise nothing is sent and
+    success is false.
     """
     app = _app(ctx)
     slave_id = _slave(app, slave_id)
+    meta: dict[str, Any] = {"address": address, "count": len(values), "slave_id": slave_id}
     if not app.settings.writes_enabled:
+        return _make_result(False, error=WRITES_DISABLED, meta=meta)
+    if not values or len(values) > MAX_WRITE_COILS:
         return _make_result(
-            False, error=WRITES_DISABLED, meta={"address": address, "slave_id": slave_id}
+            False, error=f"Write 1 to {MAX_WRITE_COILS} coils per request", meta=meta
         )
-    if not values:
-        return _make_result(False, error="Values list must not be empty")
+    span_error = _span_error(address, len(values))
+    if span_error:
+        return _make_result(False, error=span_error, meta=meta)
     client = app.modbus_client
-    op = f"write_coils addr={address} n={len(values)} slave={slave_id}"
 
     async def _call():
         return await client.write_coils(address=address, values=values, **_unit(client, slave_id))
 
-    result, err, duration_ms, attempts = await _retry_call(ctx, app, op, _call)
-    meta = {"address": address, "count": len(values), "slave_id": slave_id}
-    if err is not None:
-        meta.update(duration_ms=round(duration_ms, 3), attempts=attempts)
-        return _make_result(False, error=err, meta=meta)
-    if hasattr(result, "isError") and result.isError():
-        return _make_result(False, error=str(result), meta=meta)
+    op = f"write_coils addr={address} n={len(values)} slave={slave_id}"
+    _, failure = await _request(ctx, app, op, _call, meta)
+    if failure:
+        return failure
     await ctx.info(f"Wrote {len(values)} coils starting at {address} on slave {slave_id}")
-    return _make_result(
-        True,
-        data={"written": len(values)},
-        meta={
-            "address": address,
-            "slave_id": slave_id,
-            "duration_ms": round(duration_ms, 3),
-            "attempts": attempts,
-        },
-    )
+    return _make_result(True, data={"written": len(values)}, meta=meta)
 
 
 @mcp.tool()
 async def mask_write_register(
-    address: int, and_mask: int, or_mask: int, ctx: Context, slave_id: int | None = None
+    address: Address,
+    and_mask: Mask,
+    or_mask: Mask,
+    ctx: Context,
+    slave_id: SlaveId = None,
 ) -> dict[str, Any]:
-    """
-    Mask write register (function 22): (register = (register & and_mask) | (or_mask & ~and_mask)).
+    """Change bits of one holding register in place (function 22).
+
+    The device sets: register = (register AND and_mask) OR (or_mask AND NOT and_mask).
+    Only works when MODBUS_WRITES_ENABLED=true; otherwise nothing is sent and
+    success is false.
     """
     app = _app(ctx)
     slave_id = _slave(app, slave_id)
+    meta: dict[str, Any] = {
+        "address": address,
+        "and_mask": and_mask,
+        "or_mask": or_mask,
+        "slave_id": slave_id,
+    }
     if not app.settings.writes_enabled:
-        return _make_result(
-            False, error=WRITES_DISABLED, meta={"address": address, "slave_id": slave_id}
-        )
+        return _make_result(False, error=WRITES_DISABLED, meta=meta)
     client = app.modbus_client
-    op = f"mask_write_register addr={address} and={and_mask} or={or_mask} slave={slave_id}"
 
     async def _call():
         return await client.mask_write_register(
             address=address, and_mask=and_mask, or_mask=or_mask, **_unit(client, slave_id)
         )
 
-    result, err, duration_ms, attempts = await _retry_call(ctx, app, op, _call)
-    meta = {"address": address, "and_mask": and_mask, "or_mask": or_mask, "slave_id": slave_id}
-    if err is not None:
-        meta.update(duration_ms=round(duration_ms, 3), attempts=attempts)
-        return _make_result(False, error=err, meta=meta)
-    if hasattr(result, "isError") and result.isError():
-        return _make_result(False, error=str(result), meta=meta)
+    op = f"mask_write_register addr={address} and={and_mask} or={or_mask} slave={slave_id}"
+    _, failure = await _request(ctx, app, op, _call, meta)
+    if failure:
+        return failure
     await ctx.info(f"Mask write register {address} on slave {slave_id}")
     return _make_result(
-        True,
-        data={"address": address, "and_mask": and_mask, "or_mask": or_mask},
-        meta={"slave_id": slave_id, "duration_ms": round(duration_ms, 3), "attempts": attempts},
+        True, data={"address": address, "and_mask": and_mask, "or_mask": or_mask}, meta=meta
     )
 
 
 @mcp.tool()
 async def read_device_information(
-    ctx: Context, slave_id: int | None = None, read_code: int = 0x03, object_id: int = 0x00
+    ctx: Context,
+    slave_id: SlaveId = None,
+    read_code: Annotated[
+        int,
+        Field(ge=1, le=4, description="1 = basic, 2 = regular, 3 = extended, 4 = one object."),
+        BeforeValidator(_reject_bool),
+    ] = 0x03,
+    object_id: Annotated[
+        int,
+        Field(ge=0, le=255, description="First object to read (0 = VendorName)."),
+        BeforeValidator(_reject_bool),
+    ] = 0x00,
 ) -> dict[str, Any]:
-    """
-    Read device information (MEI type 0x2B/0x0E). read_code: 0x01=basic, 0x02=regular, 0x03=extended.
+    """Read the device identification objects (function 43 / MEI type 14).
+
+    data maps object ids to text: 0 VendorName, 1 ProductCode, 2 MajorMinorRevision,
+    3 VendorUrl, 4 ProductName, 5 ModelName, 6 UserApplicationName.
     """
     app = _app(ctx)
     client = app.modbus_client
     slave_id = _slave(app, slave_id)
-    op = f"read_device_information slave={slave_id} code={read_code} obj={object_id}"
+    meta: dict[str, Any] = {"slave_id": slave_id, "read_code": read_code, "object_id": object_id}
 
     async def _call():
         return await client.read_device_information(
             read_code=read_code, object_id=object_id, **_unit(client, slave_id)
         )
 
-    result, err, duration_ms, attempts = await _retry_call(ctx, app, op, _call)
-    meta = {"slave_id": slave_id, "duration_ms": round(duration_ms, 3), "attempts": attempts}
-    if err is not None:
-        return _make_result(False, error=err, meta=meta)
-    if hasattr(result, "isError") and result.isError():
-        return _make_result(False, error=str(result), meta={"slave_id": slave_id})
-
-    # Attempt to normalize fields
-    data: dict[str, Any] = {}
-    for attr in ("information", "informations", "items", "values"):
-        v = getattr(result, attr, None)
-        if v:
-            data = dict(v)
-            break
+    op = f"read_device_information slave={slave_id} code={read_code} obj={object_id}"
+    result, failure = await _request(ctx, app, op, _call, meta)
+    if failure:
+        return failure
+    information = getattr(result, "information", None) or {}
+    data = {
+        str(key): value.decode("utf-8", errors="replace")
+        if isinstance(value, (bytes, bytearray))
+        else value
+        for key, value in dict(information).items()
+    }
     return _make_result(True, data=data, meta=meta)
 
 
@@ -739,13 +869,18 @@ async def _read_typed(
     app = _app(ctx)
     client = app.modbus_client
     slave_id = _slave(app, slave_id)
+    base_meta: dict[str, Any] = {
+        "address": address,
+        "count": count,
+        "dtype": dtype,
+        "slave_id": slave_id,
+    }
     try:
         size = codec.register_count(dtype)
         byteorder = codec.check_order(byteorder, "byteorder")
         wordorder = codec.check_order(wordorder, "wordorder")
     except codec.CodecError as e:
-        return _make_result(False, error=str(e))
-    total = size * max(count, 1)
+        return _make_result(False, error=str(e), meta=base_meta)
     method = client.read_holding_registers if table == "holding" else client.read_input_registers
     regs, err, meta = await _chunked_read(
         ctx,
@@ -753,16 +888,15 @@ async def _read_typed(
         f"read_{table}_registers",
         lambda start, sz: method(address=start, count=sz, **_unit(client, slave_id)),
         address,
-        total,
-        125,
+        size * count,
+        MAX_READ_REGISTERS,
         "registers",
     )
-    base_meta = {"address": address, "count": count, "dtype": dtype, "slave_id": slave_id}
     if err is not None:
         return _make_result(False, error=err, meta={**base_meta, **meta})
     try:
         vals = _apply_scale(codec.decode(regs, dtype, count, byteorder, wordorder), scale, offset)
-    except Exception as e:
+    except codec.CodecError as e:
         return _make_result(False, error=str(e), meta=base_meta)
     return _make_result(
         True,
@@ -780,18 +914,21 @@ async def _read_typed(
 
 @mcp.tool()
 async def read_holding_typed(
-    address: int,
-    dtype: str,
+    address: Address,
+    dtype: DType,
     ctx: Context,
-    count: int = 1,
-    byteorder: str = "big",
-    wordorder: str = "big",
-    scale: float = 1.0,
-    offset: float = 0.0,
-    slave_id: int | None = None,
+    count: TypedCount = 1,
+    byteorder: ByteOrder = "big",
+    wordorder: WordOrder = "big",
+    scale: Scale = 1.0,
+    offset: Offset = 0.0,
+    slave_id: SlaveId = None,
 ) -> dict[str, Any]:
-    """
-    Read holding registers and decode as typed values.
+    """Read holding registers and decode them as typed values.
+
+    data.values holds `count` values of `dtype`, each multiplied by `scale` and
+    increased by `offset`. NaN and infinities come back as the strings "NaN",
+    "Infinity" and "-Infinity".
     """
     return await _read_typed(
         ctx, "holding", address, dtype, count, byteorder, wordorder, scale, offset, slave_id
@@ -800,18 +937,21 @@ async def read_holding_typed(
 
 @mcp.tool()
 async def read_input_typed(
-    address: int,
-    dtype: str,
+    address: Address,
+    dtype: DType,
     ctx: Context,
-    count: int = 1,
-    byteorder: str = "big",
-    wordorder: str = "big",
-    scale: float = 1.0,
-    offset: float = 0.0,
-    slave_id: int | None = None,
+    count: TypedCount = 1,
+    byteorder: ByteOrder = "big",
+    wordorder: WordOrder = "big",
+    scale: Scale = 1.0,
+    offset: Offset = 0.0,
+    slave_id: SlaveId = None,
 ) -> dict[str, Any]:
-    """
-    Read input registers and decode as typed values.
+    """Read input registers and decode them as typed values.
+
+    data.values holds `count` values of `dtype`, each multiplied by `scale` and
+    increased by `offset`. NaN and infinities come back as the strings "NaN",
+    "Infinity" and "-Infinity".
     """
     return await _read_typed(
         ctx, "input", address, dtype, count, byteorder, wordorder, scale, offset, slave_id
@@ -825,18 +965,30 @@ async def read_input_typed(
 
 @mcp.tool()
 async def list_tags(ctx: Context) -> dict[str, Any]:
-    """List available tags from the register map file."""
+    """List the named tags defined in the tag map (REGISTER_MAP_FILE), with their definitions."""
     app = _app(ctx)
     tags = [tag.as_dict() for _, tag in sorted(app.tags.items())]
     return _make_result(True, data={"tags": tags})
 
 
+def _unknown_tag(name: str) -> dict[str, Any]:
+    return _make_result(
+        False, error=f"Unknown tag {name!r}; list_tags shows the defined tags", meta={"tag": name}
+    )
+
+
 @mcp.tool()
-async def read_tag(name: str, ctx: Context) -> dict[str, Any]:
-    """Read a value using the configured tag map (REGISTER_MAP_FILE)."""
+async def read_tag(
+    name: Annotated[str, Field(description="Tag name from list_tags.")], ctx: Context
+) -> dict[str, Any]:
+    """Read a named tag from the tag map.
+
+    Tags with a dtype are decoded and scaled like read_holding_typed/read_input_typed;
+    other tags return raw registers or bits.
+    """
     tag = _app(ctx).tags.get(name)
     if tag is None:
-        return _make_result(False, error=f"Unknown tag: {name}")
+        return _unknown_tag(name)
     if tag.table in {"holding", "input"} and tag.dtype:
         return await _read_typed(
             ctx,
@@ -850,7 +1002,6 @@ async def read_tag(name: str, ctx: Context) -> dict[str, Any]:
             tag.offset,
             tag.slave_id,
         )
-    # Fallback to raw reads
     if tag.table == "holding":
         return await read_multiple_holding_registers(tag.address, tag.count, ctx, tag.slave_id)
     if tag.table == "input":
@@ -862,28 +1013,54 @@ async def read_tag(name: str, ctx: Context) -> dict[str, Any]:
 
 @mcp.tool()
 async def write_tag(
-    name: str,
-    value: Any,
+    name: Annotated[str, Field(description="Tag name from list_tags.")],
+    value: Annotated[
+        Any,
+        Field(
+            description=(
+                "Coil tags: true or false. Holding-register tags: a number, or a list "
+                "of `count` numbers for a tag with count > 1."
+            )
+        ),
+    ],
     ctx: Context,
 ) -> dict[str, Any]:
-    """Write a value using the configured tag map. Only holding regs and coils are writable."""
+    """Write a named holding-register or coil tag from the tag map.
+
+    Holding-register values are encoded with the tag's dtype (default uint16) and
+    byte/word order. Input and discrete-input tags are read-only. Only works when
+    MODBUS_WRITES_ENABLED=true; otherwise nothing is sent and success is false.
+    """
     app = _app(ctx)
+    meta: dict[str, Any] = {"tag": name}
     if not app.settings.writes_enabled:
-        return _make_result(False, error=WRITES_DISABLED, meta={"tag": name})
+        return _make_result(False, error=WRITES_DISABLED, meta=meta)
     tag = app.tags.get(name)
     if tag is None:
-        return _make_result(False, error=f"Unknown tag: {name}")
+        return _unknown_tag(name)
+    if not tag.writable:
+        return _make_result(False, error=f"Tag {name!r} is read-only ({tag.table})", meta=meta)
     if tag.table == "coil":
+        if tag.count != 1:
+            error = f"Tag {name!r} covers {tag.count} coils; write them with write_coils_bulk"
+            return _make_result(False, error=error, meta=meta)
+        if not (isinstance(value, bool) or (isinstance(value, int) and value in (0, 1))):
+            return _make_result(
+                False, error=f"Coil tag {name!r} takes true or false, got {value!r}", meta=meta
+            )
         return await write_coil(tag.address, bool(value), ctx, tag.slave_id)
-    if tag.table == "holding":
-        # value could be scalar or list
-        vals = value if isinstance(value, list) else [value]
-        try:
-            regs = codec.encode(vals, tag.dtype or "uint16", tag.byteorder, tag.wordorder)
-        except Exception as e:
-            return _make_result(False, error=str(e))
-        return await write_registers(tag.address, regs, ctx, tag.slave_id)
-    return _make_result(False, error=f"Unsupported/writable table for tag '{name}': {tag.table}")
+    vals = value if isinstance(value, list) else [value]
+    if len(vals) != tag.count:
+        return _make_result(
+            False,
+            error=f"Tag {name!r} holds {tag.count} value(s); got {len(vals)}",
+            meta=meta,
+        )
+    try:
+        regs = codec.encode(vals, tag.dtype or "uint16", tag.byteorder, tag.wordorder)
+    except codec.CodecError as e:
+        return _make_result(False, error=f"Tag {name!r}: {e}", meta=meta)
+    return await write_registers(tag.address, regs, ctx, tag.slave_id)
 
 
 # -----------------------------
@@ -892,7 +1069,7 @@ async def write_tag(
 
 
 @mcp.tool()
-async def ping(ctx: Context, slave_id: int | None = None) -> dict[str, Any]:
+async def ping(ctx: Context, slave_id: SlaveId = None) -> dict[str, Any]:
     """Return server health and verify end-to-end device reachability.
 
     Unlike a socket-level check, this sends a real Modbus request (read 1 holding
@@ -917,7 +1094,7 @@ async def ping(ctx: Context, slave_id: int | None = None) -> dict[str, Any]:
     probe_latency_ms = round(probe_ms, 3)
     if probe_err is not None:
         probe_error = probe_err
-    elif hasattr(probe_result, "isError") and probe_result.isError():
+    elif _is_error(probe_result):
         probe_error = str(probe_result)
     else:
         device_reachable = True
