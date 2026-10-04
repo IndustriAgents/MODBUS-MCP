@@ -277,7 +277,7 @@ IndustriConnect includes this repository as its `MODBUS-Project` git submodule, 
 
 ## Contributing
 
-Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). By taking part you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Questions and usage help: [Discussions](https://github.com/IndustriAgents/MODBUS-MCP/discussions). Security issues: report privately via [a security advisory](https://github.com/IndustriAgents/MODBUS-MCP/security/advisories/new), not an issue. By taking part you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License
 

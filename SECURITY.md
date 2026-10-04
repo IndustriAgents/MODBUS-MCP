@@ -70,8 +70,8 @@ matters for your equipment.
 ## Reporting a vulnerability
 
 Please report privately, by email to hi@industriagents.com or through GitHub
-private vulnerability reporting: the **Report a vulnerability** button on this
-repository's [Security tab](https://github.com/IndustriAgents/MODBUS-MCP/security).
+private vulnerability reporting:
+[report a vulnerability](https://github.com/IndustriAgents/MODBUS-MCP/security/advisories/new).
 
 Please do not open a public issue for a vulnerability.
 

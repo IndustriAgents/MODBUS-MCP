@@ -143,6 +143,13 @@ you used.
 - Keep tool names and argument names aligned with the other IndustriConnect
   servers.
 
+## Questions and security reports
+
+Ask questions in [Discussions](https://github.com/IndustriAgents/MODBUS-MCP/discussions).
+Report vulnerabilities privately through
+[a security advisory](https://github.com/IndustriAgents/MODBUS-MCP/security/advisories/new),
+never in a public issue (see [SECURITY.md](SECURITY.md)).
+
 ## Pull requests
 
 Branch off `main` and keep commits focused. In the pull request, say how you
