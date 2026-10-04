@@ -36,13 +36,19 @@ server at startup instead of being read as one or the other.
 
 `MODBUS_WRITES_ENABLED` is honoured only from the server's real process
 environment (for an MCP client, the `env` block of its server configuration) or
-from a file passed explicitly with `modbus-mcp --env-file PATH`. A `.env` file
-the server finds by itself (searching up from its package directory) may set
-connection settings, but not this switch: when an MCP client launches the
-server straight from a virtualenv, that search can reach the client's own
-project, which may not be trusted. If such a `.env` sets
-`MODBUS_WRITES_ENABLED`, the server ignores it and prints a warning on stderr
-naming the variable and the file. See
+from a file passed explicitly with `modbus-mcp --env-file PATH`.
+
+The server also loads one `.env` file by itself, and only one:
+`modbus-python/.env` of a source checkout, found relative to the package
+source. A `.env` in the working directory (wherever the MCP client launched the
+server, which may be an untrusted project) or in any parent directory is never
+read, and an installed package has no automatic `.env`. Even that file is
+limited, because settings such as the host and the tag map decide where a write
+goes: it may set only `MODBUS_*` and `REGISTER_MAP_FILE`, never
+`MODBUS_WRITES_ENABLED` and nothing else (`PATH`, `LD_PRELOAD`, `PYTHON*`, …).
+Keys are compared case-insensitively, with `export` prefixes and quotes
+removed, so `modbus_writes_enabled=true` counts. Every ignored key gets a
+warning on stderr naming it and the file. See
 [`modbus-python/.env.example`](modbus-python/.env.example).
 
 What the server checks before a write, when writes are enabled:
@@ -69,9 +75,18 @@ Once it has gone out, a lost or late reply is reported, not retried:
 `success: false`, `meta.outcome: "unknown"`, `meta.request_sent: true`,
 `"no reply; the write may have been applied; check before retrying"`. Read
 the value back before deciding to write again; for a command register that
-acts on every write, a second write is a second command. The other outcomes are
-`written`, `rejected` (the device answered with a Modbus exception) and
-`not_sent`.
+acts on every write, a second write is a second command.
+
+The outcome is only `rejected` when the device refused the write with a Modbus
+exception that, by the protocol's definition, comes before execution (1, 2, 3,
+6 or 10), and only `written` when its reply echoes the request. Anything else
+after the write went out, including a garbled or mismatched reply, exception 4
+(Server Device Failure) or the call's deadline (`MODBUS_CALL_TIMEOUT`), is
+`unknown`. Whether a frame went out is known exactly (pymodbus' trace hook), so
+a failure before sending is `not_sent`.
+
+The tools also tell MCP clients not to retry writes: they are annotated
+`destructiveHint: true`, `idempotentHint: false`.
 
 ## Running it safely
 

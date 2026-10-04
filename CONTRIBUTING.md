@@ -71,7 +71,7 @@ connect, so the mock can come up before or after the server.
 
 Both projects commit `uv.lock`, and `uv sync` installs exactly what it pins.
 The ranges in the two `pyproject.toml` files are the versions the tests pass
-on: the server takes `mcp>=1.6.0,<2`, `pymodbus[serial]>=3.9.2,<3.16` and
+on: the server takes `mcp>=1.7.0,<2`, `pymodbus[serial]>=3.9.2,<3.16` and
 `python-dotenv>=1.1.0`, the mock `pymodbus>=3.11.1,<3.13` (see their READMEs
 for why). CI runs the server's tests on the locked versions and again with
 `uv pip install --resolution lowest-direct`, i.e. the lowest version of every
@@ -138,11 +138,20 @@ you used.
   not at the first tool call, when it is unusable. A setting that lets the
   server change the device (`MODBUS_WRITES_ENABLED`, `GATE_VARIABLES` in
   `cli.py`) comes only from the process environment or `--env-file`, never
-  from a `.env` found automatically.
+  from the automatically loaded `.env`, which is read only from
+  `modbus-python/.env` of a checkout (never the working directory or a parent)
+  and may only set `MODBUS_*` and `REGISTER_MAP_FILE`.
 - A write reaches the device at most once. Only (re)connecting may be
   retried; once a request may have gone out, a lost reply is reported
   (`meta.outcome: "unknown"`, "may have been applied; check before retrying"),
-  never retried. Write tools report `meta.outcome` and `meta.request_sent`.
+  never retried. Write tools report `meta.outcome` and `meta.request_sent`;
+  `rejected` only for a refusal that comes before execution, `written` only
+  for a reply that echoes the request.
+- Every tool call ends within `MODBUS_CALL_TIMEOUT`; new request paths go
+  through `_retry_call` so they respect it. Write tools are annotated
+  destructive and not idempotent (`DEVICE_WRITE`), the others `READ_ONLY`.
+- Test mocks are started with `start_mock()` in `tests/conftest.py`, which
+  runs them with `--exit-on-stdin-eof` so a killed test run leaves no orphans.
 - Tool arguments are strict: integers are JSON integers (`Field(strict=True)`),
   booleans are `true`/`false`.
 - Device tools must work, or fail cleanly with `success: false`, when the

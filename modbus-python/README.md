@@ -52,7 +52,7 @@ The MCP server of [MODBUS-MCP](../README.md). It is a [uv](https://docs.astral.s
    ```bash
    uv sync
    ```
-   This installs the versions pinned in the committed `uv.lock` (`mcp` 1.30.0, `pymodbus` 3.15.0 with `pyserial` 3.5 for serial ports) plus the dev tools (pytest, ruff). The supported ranges in `pyproject.toml` are `mcp>=1.6.0,<2`, `pymodbus[serial]>=3.9.2,<3.16` and `python-dotenv>=1.1.0`: the full test suite passed with the latest patch release of every pymodbus minor from 3.9 to 3.15 and with mcp 1.6.0, 1.9.4, 1.10.1, 1.12.4, 1.16.0, 1.20.0, 1.25.0 and 1.30.0, and CI runs it on every change with the lowest version of every direct dependency (mcp 1.6.0, pymodbus 3.9.2, python-dotenv 1.1.0, pyserial 3.5). pymodbus 3.10 renamed the unit-id keyword from `slave` to `device_id`; the server uses whichever the installed version takes. mcp 2.x removed `mcp.server.fastmcp` and is not supported.
+   This installs the versions pinned in the committed `uv.lock` (`mcp` 1.30.0, `pymodbus` 3.15.0 with `pyserial` 3.5 for serial ports) plus the dev tools (pytest, ruff). The supported ranges in `pyproject.toml` are `mcp>=1.7.0,<2`, `pymodbus[serial]>=3.9.2,<3.16` and `python-dotenv>=1.1.0`: the full test suite passed with the latest patch release of every pymodbus minor from 3.9 to 3.15 and with mcp 1.7.0, 1.9.4, 1.10.1, 1.12.4, 1.16.0, 1.20.0, 1.25.0 and 1.30.0, and CI runs it on every change with the lowest version of every direct dependency (mcp 1.7.0, pymodbus 3.9.2, python-dotenv 1.1.0, pyserial 3.5). mcp 1.7.0 is the first release with tool annotations. pymodbus 3.10 renamed the unit-id keyword from `slave` to `device_id`; the server uses whichever the installed version takes. mcp 2.x removed `mcp.server.fastmcp` and is not supported.
 
 ## Configuration
 
@@ -60,9 +60,9 @@ The server connects to a Modbus device using parameters specified via environmen
 
 1. the process environment (for an MCP client, the `env` block of its server configuration);
 2. a file passed explicitly with `modbus-mcp --env-file PATH`;
-3. a `.env` found automatically, by searching up from the installed package's directory (for this checkout, `modbus-python/.env`).
+3. `modbus-python/.env` of this source checkout, loaded automatically. It is found relative to the package source, never in the working directory (wherever the MCP client launched the server) or a parent directory; an installed package has no automatic `.env`.
 
-**A `.env` found automatically cannot enable writes.** It may set connection settings, but `MODBUS_WRITES_ENABLED` is only honoured from (1) or (2): when an MCP client launches the server straight from a virtualenv, the search can reach the client's own project, which may not be trusted. If an automatically found `.env` sets it, the server ignores it and prints `modbus-mcp: warning: ignoring MODBUS_WRITES_ENABLED from <file>` on stderr. [`.env.example`](.env.example) lists every setting.
+**The automatically loaded `.env` cannot enable writes, and may only set this server's settings.** Settings such as the host and the tag map decide where a write goes, so it may set `MODBUS_*` and `REGISTER_MAP_FILE` but not `MODBUS_WRITES_ENABLED` (only honoured from (1) or (2)) and nothing else (`PATH`, `LD_PRELOAD`, `PYTHON*`, …). Keys are compared case-insensitively, as Windows does, with `export` prefixes and quotes removed, so `modbus_writes_enabled=true` is caught too. Each ignored key gets `modbus-mcp: warning: ignoring <KEY> from <file>` on stderr. [`.env.example`](.env.example) lists every setting.
 
 The configuration is checked when it is read. An invalid value (a port that is not a number, an unknown `MODBUS_TYPE`, `MODBUS_WRITES_ENABLED=maybe`, a tag map that does not exist or does not validate) stops the server with exit status 2 and a `modbus-mcp: configuration error: …` message on stderr. An empty value means the default.
 
@@ -85,7 +85,8 @@ The configuration is checked when it is read. An invalid value (a port that is n
 | `MODBUS_MAX_RETRIES`       | Retries after a failed read or a failed connection attempt (0-10); a write is never sent twice | `2` | — |
 | `MODBUS_RETRY_BACKOFF_BASE`| Backoff base in seconds (doubled per retry)     | `0.2`                | —        |
 | `MODBUS_TOOL_TIMEOUT`      | Per-request timeout (seconds; unset or `0` = none) | unset             | —        |
-| `MODBUS_WRITES_ENABLED`    | Allow the write tools (`true`/`false`, also `1`/`0`, `yes`/`no`, `on`/`off`). Only from the process environment or `--env-file`; ignored in an automatically found `.env` | `false` | — |
+| `MODBUS_CALL_TIMEOUT`      | Overall deadline for one tool call, in seconds; on expiry a read fails cleanly and a write that went out is `unknown` | `30` | — |
+| `MODBUS_WRITES_ENABLED`    | Allow the write tools (`true`/`false`, also `1`/`0`, `yes`/`no`, `on`/`off`). Only from the process environment or `--env-file`; ignored in the automatically loaded `.env` | `false` | — |
 | `REGISTER_MAP_FILE`        | Path to JSON tag map file                       | unset                | —        |
 
 ### Example `.env` File
@@ -109,7 +110,7 @@ MODBUS_BYTESIZE=8
 MODBUS_TIMEOUT=1
 ```
 
-Neither enables writes, and a `.env` found automatically could not: to allow writes, set `MODBUS_WRITES_ENABLED=true` in the MCP client's `env` block, or put it in a file you pass with `--env-file`:
+Neither enables writes, and the automatically loaded `.env` could not: to allow writes, set `MODBUS_WRITES_ENABLED=true` in the MCP client's `env` block, or put it in a file you pass with `--env-file`:
 
 ```json
 {
@@ -140,7 +141,14 @@ The configuration file:
 
 All tools return a structured object: `{ "success": bool, "data": any, "error": string|null, "meta": object }`. Addresses are zero-based.
 
-The write tools add `meta.outcome` and `meta.request_sent`: `written` (the device acknowledged the write), `rejected` (it answered with a Modbus exception), `not_sent` (refused before sending: writes disabled, invalid arguments, device unreachable; `request_sent: false`), or `unknown` (sent, but no reply: `"no reply; the write may have been applied; check before retrying"`). Nothing is sent twice, so read the value back before writing again after an `unknown`. The examples use addresses that exist on the [mock device](../modbus-mock-server/README.md#register-map-unitslave-id-any) (every table holds addresses 0-99; 10-99 are unused, free for experiments); the writes need `MODBUS_WRITES_ENABLED=true`.
+The write tools add `meta.outcome` and `meta.request_sent`:
+
+- `written`: the device acknowledged the write with a reply that echoes it (function code, address, and value, count or masks);
+- `rejected`: the device refused it with a Modbus exception that comes before execution by the protocol's definition: 1, 2, 3, 6 or 10;
+- `not_sent` (`request_sent: false`): refused before sending, because writes are disabled, the arguments are invalid, the device is unreachable, or encoding failed locally; whether a frame went out is known exactly, from pymodbus' `trace_packet` hook;
+- `unknown` (`request_sent: true`): it went out, and then there was no reply (`"no reply; the write may have been applied; check before retrying"`), a reply that does not echo the request (`meta.reply_mismatch`), another exception (4 Server Device Failure, 5 Acknowledge, 8, 11), or the call's deadline passed.
+
+Nothing is sent twice, so read the value back before writing again after an `unknown`. The examples use addresses that exist on the [mock device](../modbus-mock-server/README.md#register-map-unitslave-id-any) (every table holds addresses 0-99; 10-99 are unused, free for experiments); the writes need `MODBUS_WRITES_ENABLED=true`.
 
 1. Read one holding register (Valve Position on the mock)
    ```json
@@ -282,7 +290,8 @@ The integration tests (`-m integration`) start the mock device from `../modbus-m
 
 ## Known issues
 
-- **With mcp 1.6-1.9 the server does not exit when stdin closes.** That is the mcp SDK's stdio transport; MCP clients stop it with SIGTERM afterwards, as the protocol specifies. The locked mcp 1.30.0 exits on its own.
+- **With mcp 1.7.x the server does not exit when stdin closes.** That is the mcp SDK's stdio transport (fixed in 1.8.0); MCP clients stop it with SIGTERM afterwards, as the protocol specifies. The locked mcp 1.30.0 exits on its own.
+- **A malformed coil echo can pass as ON.** pymodbus decodes any non-zero value in a write_coil reply as ON, so a device that echoes ON as something other than `0xFF00` is still reported `written`. An echo of the other state is caught (`unknown`).
 
 ## Testing, Security and Contributing
 

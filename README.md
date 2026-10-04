@@ -13,12 +13,13 @@ It is part of the [IndustriConnect](https://github.com/IndustriAgents/IndustriCo
 
 ## Features
 
-- Read-only by default: the six write tools refuse to send anything unless the server is started with `MODBUS_WRITES_ENABLED=true`, taken only from the process environment or an explicit `--env-file`, never from a `.env` found automatically
+- Read-only by default: the six write tools refuse to send anything unless the server is started with `MODBUS_WRITES_ENABLED=true`, taken only from the process environment or an explicit `--env-file`, never from the automatically loaded `.env`
 - Writes are sent at most once: if the reply is lost, the result says so (`"no reply; the write may have been applied; check before retrying"`, `meta.outcome: "unknown"`) and nothing is sent again
 - Core Modbus tools: coils, discrete inputs, holding/input registers; masked write; device identification
 - Typed decode/encode: int16/uint16/int32/uint32/float32/int64/uint64/float64 with byteorder/wordorder, scale, offset
 - Tag map: optional JSON map of named points with `list_tags`, `read_tag`, `write_tag`, validated when the server starts
-- Reliability: reads retried with backoff, per‑tool timeouts, automatic chunking of large reads; starts without the device and connects on first use, reconnects after a drop
+- Reliability: reads retried with backoff, an overall deadline per tool call (`MODBUS_CALL_TIMEOUT`), automatic chunking of large reads; starts without the device and connects on first use, reconnects after a drop
+- Tool annotations: write tools are marked destructive and not idempotent, read tools read-only, so MCP clients do not treat a write as safe to retry
 - Health: `ping` sends a real Modbus request and reports whether the device answered, plus the configuration
 - Structured results: every tool returns `{ success, data, error, meta }`, including for invalid arguments and device exceptions; arguments must be JSON integers and booleans of the right type (no `"5"`, `5.0` or `1` for `true`)
 
@@ -46,10 +47,10 @@ Each of `modbus-python/` and `modbus-mock-server/` is its own uv project with a 
 
 | Project | Locked | Supported range (in `pyproject.toml`) |
 |---------|--------|----------------------------------------|
-| `modbus-python` | `mcp` 1.30.0, `pymodbus` 3.15.0, `python-dotenv` 1.2.4, `pyserial` 3.5 | `mcp>=1.6.0,<2`, `pymodbus[serial]>=3.9.2,<3.16`, `python-dotenv>=1.1.0` |
+| `modbus-python` | `mcp` 1.30.0, `pymodbus` 3.15.0, `python-dotenv` 1.2.4, `pyserial` 3.5 | `mcp>=1.7.0,<2`, `pymodbus[serial]>=3.9.2,<3.16`, `python-dotenv>=1.1.0` |
 | `modbus-mock-server` | `pymodbus` 3.12.1 | `pymodbus>=3.11.1,<3.13` |
 
-The ranges are what the test suite passes on: the server's full suite (unit tests plus the stdio and mock integration tests) passed with the latest patch release of every pymodbus minor from 3.9 to 3.15 (3.9.2, 3.10.0, 3.11.4, 3.12.1, 3.13.1, 3.14.0, 3.15.0) and with mcp 1.6.0, 1.9.4, 1.10.1, 1.12.4, 1.16.0, 1.20.0, 1.25.0 and 1.30.0. CI runs it on the lockfile and on the lowest version of every direct dependency (`uv pip install --resolution lowest-direct`: mcp 1.6.0, pymodbus 3.9.2, python-dotenv 1.1.0, pyserial 3.5). `mcp` 2.x removed the `mcp.server.fastmcp` module this server is built on. The mock's limits are explained in its [Known issues](modbus-mock-server/README.md#known-issues).
+The ranges are what the test suite passes on: the server's full suite (unit tests plus the stdio and mock integration tests) passed with the latest patch release of every pymodbus minor from 3.9 to 3.15 (3.9.2, 3.10.0, 3.11.4, 3.12.1, 3.13.1, 3.14.0, 3.15.0) and with mcp 1.7.0, 1.9.4, 1.10.1, 1.12.4, 1.16.0, 1.20.0, 1.25.0 and 1.30.0. CI runs it on the lockfile and on the lowest version of every direct dependency (`uv pip install --resolution lowest-direct`: mcp 1.7.0, pymodbus 3.9.2, python-dotenv 1.1.0, pyserial 3.5). mcp 1.7.0 is the first release with tool annotations; `mcp` 2.x removed the `mcp.server.fastmcp` module this server is built on. The mock's limits are explained in its [Known issues](modbus-mock-server/README.md#known-issues).
 
 ## Quick Start (Local)
 
@@ -100,7 +101,7 @@ Python server (uv):
 }
 ```
 
-That configuration is read-only. Add `"MODBUS_WRITES_ENABLED": "true"` to `env` only when the model should be able to change the device, or keep the settings in a file and pass it explicitly: `"args": [..., "modbus-mcp", "--env-file", "/absolute/path/to/plant.env"]`. A `.env` the server finds by itself cannot enable writes (see [Environment Variables](#environment-variables)).
+That configuration is read-only. Add `"MODBUS_WRITES_ENABLED": "true"` to `env` only when the model should be able to change the device, or keep the settings in a file and pass it explicitly: `"args": [..., "modbus-mcp", "--env-file", "/absolute/path/to/plant.env"]`. The `.env` the server loads by itself cannot enable writes (see [Environment Variables](#environment-variables)).
 
 ### MCP Inspector / CLI
 
@@ -110,7 +111,14 @@ The Inspector command in [Quick Start](#quick-start-local) step 3 opens a web UI
 
 All tools return `{ success, data, error, meta }`. A failure, whether an invalid argument, a Modbus exception from the device, a timeout, an unreachable device, or writes being disabled, comes back as `success: false` with the reason in `error`.
 
-The write tools also say what happened to the write, in `meta.outcome` and `meta.request_sent`: `written` (acknowledged), `rejected` (the device answered with a Modbus exception), `not_sent` (refused before sending: writes disabled, invalid arguments, device unreachable), or `unknown`. A write is sent at most once; if it went out and no reply came back, the result is `success: false`, `outcome: "unknown"`, `request_sent: true` and `"no reply; the write may have been applied; check before retrying"`. Read the value back before writing again.
+The write tools also say what happened to the write, in `meta.outcome` and `meta.request_sent`:
+
+- `written`: the device acknowledged it with a reply that echoes the request;
+- `rejected`: the device refused it with a Modbus exception that, by the protocol's definition, comes before the request is executed (1 Illegal Function, 2 Illegal Data Address, 3 Illegal Data Value, 6 Server Device Busy, 10 Gateway Path Unavailable);
+- `not_sent`: refused before anything was sent (writes disabled, invalid arguments, device unreachable, a local failure while encoding);
+- `unknown`: it went out, and then there was no reply, a reply that does not echo the request, an exception that does not rule a write out (such as 4 Server Device Failure), or the deadline passed. The error says `"the write may have been applied; check before retrying"`; for a lost reply it is `"no reply; the write may have been applied; check before retrying"`.
+
+A write is sent at most once. Read the value back before writing again after an `unknown`.
 
 | Kind | Tools |
 |------|-------|
@@ -224,9 +232,9 @@ Read once when the server starts, from these sources, highest precedence first:
 
 1. the process environment (for an MCP client, the `env` block of its server configuration);
 2. a file passed explicitly with `modbus-mcp --env-file PATH`;
-3. a `.env` found automatically, by searching up from the installed package's directory (for a checkout, `modbus-python/.env`).
+3. `modbus-python/.env` of a source checkout, loaded automatically. It is found relative to the package source: a `.env` in the working directory (wherever the MCP client launched the server, possibly an untrusted project) or in any parent directory is never read, and an installed package has no automatic `.env` at all.
 
-The automatically found `.env` may set connection settings but **not** `MODBUS_WRITES_ENABLED`: when an MCP client launches the server, that search can reach the client's own project, which may not be trusted. If it appears there, the server ignores it and prints `modbus-mcp: warning: ignoring MODBUS_WRITES_ENABLED from …` on stderr. [modbus-python/.env.example](modbus-python/.env.example) lists every setting.
+The automatically loaded `.env` is limited, because settings such as the host and the tag map decide where a write goes. It may set only modbus-mcp's own settings (`MODBUS_*` and `REGISTER_MAP_FILE`; anything else, such as `PATH` or `PYTHONPATH`, is ignored), and **not** `MODBUS_WRITES_ENABLED`, in any spelling (keys are compared case-insensitively, as Windows does, with `export` prefixes and quotes removed). Each ignored key gets a `modbus-mcp: warning: ignoring … from …` line on stderr. [modbus-python/.env.example](modbus-python/.env.example) lists every setting.
 
 An invalid value stops the server with a `configuration error` message on stderr. An empty value means the default.
 
@@ -242,7 +250,8 @@ An invalid value stops the server with a `configuration error` message on stderr
 - MODBUS_TIMEOUT: serial timeout in seconds (default: 1; only used when MODBUS_TYPE=serial; TCP/UDP wait up to 3 s for a reply, pymodbus' default)
 - MODBUS_MAX_RETRIES: retries after a failed read or a failed connection attempt, 0-10 (default: 2); a write is never sent twice
 - MODBUS_RETRY_BACKOFF_BASE: backoff seconds, doubled per retry (default: 0.2)
-- MODBUS_TOOL_TIMEOUT: per‑request timeout in seconds (default: unset or 0 = none)
+- MODBUS_TOOL_TIMEOUT: per‑request timeout in seconds (default: unset or 0 = none; TCP/UDP requests still end after pymodbus' 3 s)
+- MODBUS_CALL_TIMEOUT: overall deadline for one tool call in seconds (default: 30); a read then fails cleanly, a write that went out is `unknown`
 - MODBUS_WRITES_ENABLED: true/false to allow writes (default: **false**; only from the process environment or `--env-file`)
 - REGISTER_MAP_FILE: path to tag‑map JSON (optional)
 
@@ -272,6 +281,7 @@ An invalid value stops the server with a `configuration error` message on stderr
 - `cannot reach device at …` → nothing answers at MODBUS_HOST:MODBUS_PORT; start the mock or check the address (the server keeps trying on every call)
 - `no reply; the write may have been applied; check before retrying` → the write went out but its reply was lost; read the value back before deciding to write again
 - `modbus-mcp: warning: ignoring MODBUS_WRITES_ENABLED from …/.env` → set it in the MCP client's `env` block, or pass the file with `--env-file`
+- `no result within the 30 s deadline (MODBUS_CALL_TIMEOUT)` → the device answered too slowly, or with something pymodbus could not decode; raise `MODBUS_CALL_TIMEOUT` if the device is just slow
 - `modbus-mcp: configuration error: …` → a `MODBUS_*` variable or the tag map is invalid; the message names it
 - `uv run modbus-mcp` prints nothing → expected: it is a stdio server waiting for an MCP client on stdin; launch it from a client instead (see [Quick Start](#quick-start-local) step 3)
 - `Writes are disabled by configuration` → writes are off by default; set `MODBUS_WRITES_ENABLED=true` if the model should be allowed to write
@@ -280,7 +290,7 @@ An invalid value stops the server with a `configuration error` message on stderr
 
 ## Security
 
-Modbus has no authentication or encryption: anything that can reach the device can read and write it. This server is read-only unless it is started with `MODBUS_WRITES_ENABLED=true` in its environment or `--env-file` (a `.env` it finds by itself cannot enable writes); enable writes only when the model should be able to change the device, start against the mock, and never point it at a safety system. Each write is sent at most once. See [SECURITY.md](SECURITY.md) for the full posture and how to report a vulnerability privately.
+Modbus has no authentication or encryption: anything that can reach the device can read and write it. This server is read-only unless it is started with `MODBUS_WRITES_ENABLED=true` in its environment or `--env-file` (the `.env` it loads by itself cannot enable writes); enable writes only when the model should be able to change the device, start against the mock, and never point it at a safety system. Each write is sent at most once. See [SECURITY.md](SECURITY.md) for the full posture and how to report a vulnerability privately.
 
 ## Part of IndustriConnect
 

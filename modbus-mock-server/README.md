@@ -75,6 +75,8 @@ Environment overrides (read when the mock starts):
 
 The mock logs to stderr. If a simulation step fails, it logs the error with a traceback (once per distinct error) and keeps running.
 
+`--exit-on-stdin-eof` makes the mock stop when its stdin is closed. Test harnesses use it with a pipe they hold, so the mock cannot outlive the process that started it (the modbus-python tests do); run by hand, leave it out.
+
 ## Test with modbus-mcp
 
 The MCP server in [`modbus-python/`](../modbus-python/README.md) is a stdio server, so let an MCP client launch it rather than running it in a terminal (by hand it prints nothing and waits for a client on stdin). For example, with the [MCP Inspector](https://modelcontextprotocol.io/docs/tools/inspector), from the repository root:
