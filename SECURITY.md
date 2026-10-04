@@ -92,8 +92,11 @@ write's byte for byte). Modbus RTU replies carry no transaction id, so a late
 reply to an earlier request could otherwise make a later write look
 `rejected`, or be returned as a read. After any request goes unanswered, the
 server closes the connection before another request can use it and reconnects
-on the next call (on a serial line after a quiet period), so late replies are
-dropped.
+on the next call (on a serial line after a quiet period of `MODBUS_TIMEOUT`), so
+a late reply is not taken for the next request's. On a serial line, a reply
+later than twice `MODBUS_TIMEOUT` can still be mistaken for the next request's
+when it fits that request (an exception with the same function code, for
+example); set `MODBUS_TIMEOUT` above the device's worst-case response time.
 
 A write that has not gone out is never sent after its call was abandoned: when
 the client cancels it (also in the same instant the write is granted its turn:

@@ -19,7 +19,7 @@ It is part of the [IndustriConnect](https://github.com/IndustriAgents/IndustriCo
 - Typed decode/encode: int16/uint16/int32/uint32/float32/int64/uint64/float64 with byteorder/wordorder, scale, offset
 - Tag map: optional JSON map of named points with `list_tags`, `read_tag`, `write_tag`, validated when the server starts
 - Reliability: reads retried with backoff, an overall deadline per tool call (`MODBUS_CALL_TIMEOUT`), automatic chunking of large reads; starts without the device and connects on first use, reconnects after a drop
-- Replies are checked against their request (function code, count, echoed values), and after a request goes unanswered the connection is reset, so a late reply is never taken for another request's (Modbus RTU replies carry no transaction id)
+- Replies are checked against their request (function code, count, echoed values), and after a request goes unanswered the connection is reset (on a serial line after a quiet period of `MODBUS_TIMEOUT`), so a late reply is not taken for another request's (Modbus RTU replies carry no transaction id). On a serial line, a reply later than twice `MODBUS_TIMEOUT` can still be mistaken; set `MODBUS_TIMEOUT` above the device's worst-case response time
 - Tool annotations: write tools are marked destructive and not idempotent, read tools read-only, so MCP clients do not treat a write as safe to retry
 - Health: `ping` sends a real Modbus request and reports whether the device answered, plus the configuration
 - Structured results: every tool returns `{ success, data, error, meta }`, including for invalid arguments and device exceptions; arguments must be JSON integers and booleans of the right type (no `"5"`, `5.0` or `1` for `true`)

@@ -618,7 +618,8 @@ async def _retry_call(
     count, echo); a reply that does not is not used (a read is retried, a write
     returns WRITE_REPLY_MISMATCH) and details["reply_mismatch"] says why. Whenever a
     request went out and its reply was not taken, the connection is closed
-    (_desync), so a late reply cannot be taken for the next request's.
+    (_desync), so a late reply is not taken for the next request's (on a serial
+    line, one up to twice MODBUS_TIMEOUT late; see _reconnect's quiet period).
     """
     settings = app.settings
     client = app.modbus_client
