@@ -8,6 +8,7 @@ diagnostics go to stderr (logging) or to the client as MCP log messages.
 # parameter by comparing the annotation object itself (`is Context`).
 import argparse
 import asyncio
+import contextlib
 import contextvars
 import functools
 import inspect
@@ -16,6 +17,7 @@ import logging
 import math
 import os
 import re
+import struct
 import sys
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -48,6 +50,13 @@ WRITES_DISABLED = (
 )
 # A write request went out but no reply came back. It is never sent again.
 WRITE_NO_REPLY = "no reply; the write may have been applied; check before retrying"
+# A reply came back, but it is not the reply to this write (another request's, or
+# garbled): the write went out and may have been applied.
+WRITE_REPLY_MISMATCH = (
+    "the device's reply does not match the write; "
+    "the write may have been applied; check before retrying"
+)
+READ_REPLY_MISMATCH = "the device's reply does not match the request"
 WRITE_TOOLS = frozenset(
     {
         "write_register",
@@ -159,10 +168,24 @@ class AppContext:
     frames_sent: Callable[[], int] | None = None
     # True once the MCP client has disconnected: nothing may be sent any more.
     closing: Callable[[], bool] = lambda: False
+    # The raw bytes received since the last request was sent (see SendGate), for
+    # checks the decoded reply cannot make; None when not available.
+    last_reply: Callable[[], bytes] | None = None
+    # After a request went unanswered on a serial line, no new connection before this
+    # (time.monotonic()), so a late reply has time to arrive and be dropped.
+    quiet_until: float = 0.0
 
 
 class RequestNotSent(Exception):
     """Raised by SendGate in place of sending a request that must not go out."""
+
+
+class NotConnected(RequestNotSent):
+    """Raised by SendGate when the connection is gone: nothing was written (pymodbus
+    would drop the frame silently), and a new connection may succeed."""
+
+
+_RX_KEEP = 512  # bytes of the latest reply kept for checks (a Modbus frame is <= 260)
 
 
 class SendGate:
@@ -173,23 +196,37 @@ class SendGate:
     no await between this check and the send. It refuses the send (raising
     RequestNotSent, so nothing is written) when the MCP client has disconnected,
     the tool call was cancelled, or its deadline has passed; a request that was
-    queued, reconnecting or waiting then is never sent later. Otherwise it counts
-    the frame, so an unchanged count means nothing went out.
+    queued, reconnecting or waiting then is never sent later. It also refuses
+    (NotConnected) when the connection has been closed, since pymodbus would
+    otherwise drop the frame silently. Otherwise it counts the frame, so an
+    unchanged count means nothing went out.
+
+    trace_packet(False, data) is called with the bytes received; the gate keeps
+    those that arrived since the last send (`rx`).
     """
 
     def __init__(self, closing: Callable[[], bool] = lambda: False) -> None:
         self.sent = 0
+        self.client: Any = None  # the pymodbus client, once created
+        self.rx = bytearray()
         self._closing = closing
 
     def __call__(self, sending: bool, data: bytes) -> bytes:
-        if sending:
-            reason = _why_not_send(self._closing())
-            if reason is not None:
-                raise RequestNotSent(reason)
-            self.sent += 1
-            state = _CALL.get()  # the call whose task is sending this frame
-            if state is not None:
-                state.frames += 1
+        if not sending:
+            self.rx += data
+            del self.rx[:-_RX_KEEP]
+            return data
+        reason = _why_not_send(self._closing())
+        if reason is not None:
+            raise RequestNotSent(reason)
+        context = getattr(self.client, "ctx", None)
+        if context is not None and not getattr(context, "transport", None):
+            raise NotConnected("not connected (the connection was closed)")
+        self.sent += 1
+        self.rx = bytearray()
+        state = _CALL.get()  # the call whose task is sending this frame
+        if state is not None:
+            state.frames += 1
         return data
 
 
@@ -368,10 +405,31 @@ def _span_error(address: int, span: int) -> str | None:
 
 
 async def _with_timeout(coro: Awaitable[Any], timeout: float | None) -> Any:
-    """Await `coro`, giving up after `timeout` seconds (None: no limit; <= 0: at once)."""
+    """Await `coro`, giving up after `timeout` seconds (None: no limit; <= 0: at once).
+
+    Raises TimeoutError. anyio runs `coro` in this task (asyncio.wait_for used a
+    separate task on Python 3.10, whose late exception was then never retrieved).
+    """
     if timeout is None:
         return await coro
-    return await asyncio.wait_for(coro, timeout=max(timeout, 0.0))
+    with anyio.fail_after(max(timeout, 0.0)):
+        return await coro
+
+
+def _desync(app: AppContext) -> None:
+    """A request went out and its reply was not taken: close the connection.
+
+    A late reply could otherwise be read as the reply to the next request: Modbus
+    RTU has no transaction id, and pymodbus before 3.12 does not check TCP's. Called
+    synchronously in the step the request failed, before another task (queued on
+    pymodbus' lock) can send on the same connection; that one then finds no
+    transport (SendGate: NotConnected) and reconnects. On a serial line the new
+    connection waits for a quiet period (MODBUS_TIMEOUT) first.
+    """
+    with contextlib.suppress(Exception):
+        app.modbus_client.close()
+    if app.settings.modbus_type == "serial":
+        app.quiet_until = time.monotonic() + app.settings.serial_timeout
 
 
 async def _reconnect(ctx: Context, app: AppContext, op: str) -> bool:
@@ -386,6 +444,9 @@ async def _reconnect(ctx: Context, app: AppContext, op: str) -> bool:
         if getattr(client, "connected", False):
             return True  # another call reconnected while this one waited
         await ctx.info(f"{op}: not connected, reconnecting to {app.settings.target}")
+        quiet = app.quiet_until - time.monotonic()
+        if quiet > 0:  # let a late reply on the serial line arrive (and be dropped) first
+            await asyncio.sleep(quiet)
         try:
             client.close()
             await client.connect()
@@ -433,8 +494,8 @@ def _remaining() -> float | None:
     return state.expires - asyncio.get_running_loop().time()
 
 
-def _why_not_send(closing: bool) -> str | None:
-    """Why the current call must not send anything now, or None."""
+def _abandoned(closing: bool) -> str | None:
+    """Why nobody wants the current call's result any more, or None."""
     if closing:
         return "the MCP client disconnected"
     state = _CALL.get()
@@ -442,7 +503,16 @@ def _why_not_send(closing: bool) -> str | None:
         return None
     if state.cancelled:
         return "the call was cancelled"
-    if asyncio.get_running_loop().time() >= state.expires:
+    return None
+
+
+def _why_not_send(closing: bool) -> str | None:
+    """Why the current call must not send anything now, or None."""
+    reason = _abandoned(closing)
+    if reason is not None:
+        return reason
+    state = _CALL.get()
+    if state is not None and asyncio.get_running_loop().time() >= state.expires:
         return _deadline_error()
     return None
 
@@ -468,7 +538,7 @@ async def run_with_deadline(
 
     _retry_call shortens every request, reconnect and backoff to fit, so a call
     ends with a precise outcome when the deadline is reached. As a backstop, the
-    whole call is cancelled DEADLINE_BACKSTOP seconds later (asyncio.TimeoutError).
+    whole call is cancelled DEADLINE_BACKSTOP seconds later (TimeoutError).
     If the call ends without a result for any reason (cancelled by the client,
     the client disconnecting, the backstop), it is marked cancelled first, so
     nothing it queued can be sent afterwards (see SendGate).
@@ -476,7 +546,8 @@ async def run_with_deadline(
     state = state or _CallState.start(seconds)
     token = _CALL.set(state)
     try:
-        return await asyncio.wait_for(coro, seconds + DEADLINE_BACKSTOP)
+        with anyio.fail_after(seconds + DEADLINE_BACKSTOP):
+            return await coro
     except BaseException:
         state.cancelled = True
         raise
@@ -511,6 +582,7 @@ async def _retry_call(
     *,
     write: bool = False,
     details: dict[str, Any] | None = None,
+    check: Callable[[Any], dict[str, Any] | None] | None = None,
 ) -> tuple[Any | None, str | None, float, int]:
     """Execute call with retries and timeout. Returns (result, error, duration, attempts).
 
@@ -526,6 +598,12 @@ async def _retry_call(
     reply returns WRITE_NO_REPLY; sending it again could apply it twice. (The
     pymodbus client is created with retries=0 for the same reason; see
     _make_client.) The underlying error, if any, goes to `details["cause"]`.
+
+    `check(reply)` says whether the reply belongs to this request (function code,
+    count, echo); a reply that does not is not used (a read is retried, a write
+    returns WRITE_REPLY_MISMATCH) and details["reply_mismatch"] says why. Whenever a
+    request went out and its reply was not taken, the connection is closed
+    (_desync), so a late reply cannot be taken for the next request's.
     """
     settings = app.settings
     client = app.modbus_client
@@ -545,10 +623,9 @@ async def _retry_call(
         if attempt > 1:
             backoff = settings.retry_backoff_base * (2 ** (attempt - 2))
             await asyncio.sleep(max(0.0, _limit(backoff) or 0.0))
-        state = _CALL.get()
-        if app.closing() or (state is not None and state.cancelled):
+        not_now = _abandoned(app.closing())
+        if not_now is not None:
             # The client disconnected or the call was cancelled: stop, send nothing more.
-            not_now = _why_not_send(app.closing())
             last_err = f"the request was not sent: {not_now}"
             details.update(request_sent=_sent_since(app, frames_at_start), cause=not_now)
             break
@@ -561,15 +638,33 @@ async def _retry_call(
         if not getattr(client, "connected", True):
             try:
                 connected = await _with_timeout(_reconnect(ctx, app, op), _limit(None))
-            except asyncio.TimeoutError:
+            except (TimeoutError, asyncio.TimeoutError):
                 connected = False
             if not connected:
                 last_err = f"cannot reach device at {settings.target}"
                 continue
         frames_before = _frames_now(app)
         try:
-            result = await _with_timeout(call_factory(), _limit(settings.tool_timeout))
+            try:
+                result = await _with_timeout(call_factory(), _limit(settings.tool_timeout))
+            except BaseException:
+                if _sent_since(app, frames_before) is not False:
+                    _desync(app)  # synchronously, before a queued request can send
+                raise
+            mismatch = check(result) if check is not None else None
+            if mismatch:
+                _desync(app)
+                details["reply_mismatch"] = mismatch
+                await ctx.error(f"{op}: the reply does not match the request: {mismatch}")
+                if write:
+                    return None, WRITE_REPLY_MISMATCH, elapsed_ms(), attempt
+                last_err = READ_REPLY_MISMATCH
+                continue
             return result, None, elapsed_ms(), attempt
+        except NotConnected as e:  # the connection was closed under it: nothing went out
+            last_err = f"cannot reach device at {settings.target}"
+            details["cause"] = str(e)
+            await ctx.error(f"{op} failed on attempt {attempt}: {e}")
         except RequestNotSent as e:  # SendGate refused: nothing went out
             last_err = f"the request was not sent: {e}"
             details.update(request_sent=False, cause=str(e))
@@ -600,6 +695,57 @@ async def _retry_call(
     return None, last_err, elapsed_ms(), attempt
 
 
+def reply_check(
+    function_code: int,
+    *,
+    registers: int | None = None,
+    bits: int | None = None,
+    echo: dict[str, Any] | None = None,
+    raw: tuple[bytes, Callable[[], bytes] | None] | None = None,
+) -> Callable[[Any], dict[str, Any] | None]:
+    """A check that a reply belongs to the request: what is wrong with it, or None.
+
+    - an exception reply must carry this request's function code (+ 0x80);
+    - a normal reply must have the function code, exactly `registers` registers or
+      `bits` bits (padded to whole bytes, as on the wire), and echo the fields in
+      `echo` (Modbus write replies repeat the request);
+    - `raw` = (expected PDU, provider of the raw reply bytes): the reply frame must
+      end with that PDU (for TCP/UDP) or with it followed by the CRC (RTU). It is for
+      replies the decoded object cannot show exactly (pymodbus decodes any non-zero
+      FC 5 value as ON).
+
+    Modbus RTU has no transaction id, so a reply to an earlier request (a late one,
+    or one for another unit) can otherwise be taken for this request's.
+    """
+
+    def check(response: Any) -> dict[str, Any] | None:
+        got = getattr(response, "function_code", None)
+        if _is_error(response):
+            if not isinstance(got, int) or got & 0x7F != function_code:
+                return {"function_code": {"expected": function_code | 0x80, "got": got}}
+            return None
+        problems: dict[str, Any] = {}
+        if got != function_code:
+            problems["function_code"] = {"expected": function_code, "got": got}
+        if registers is not None:
+            count = len(getattr(response, "registers", None) or [])
+            if count != registers:
+                problems["registers"] = {"expected": registers, "got": count}
+        if bits is not None:
+            count = len(getattr(response, "bits", None) or [])
+            if count != 8 * ((bits + 7) // 8):
+                problems["bits"] = {"expected": 8 * ((bits + 7) // 8), "got": count}
+        if echo:
+            problems.update(_echo_mismatch(response, echo))
+        if raw is not None and raw[1] is not None:
+            pdu, frame = raw[0], bytes(raw[1]())
+            if not (frame.endswith(pdu) or frame[:-2].endswith(pdu)):
+                problems["raw_reply"] = {"expected_pdu": pdu.hex(), "got": frame.hex()}
+        return problems or None
+
+    return check
+
+
 async def _request(
     ctx: Context,
     app: AppContext,
@@ -607,26 +753,27 @@ async def _request(
     call: Callable[[], Awaitable[Any]],
     meta: dict,
     *,
+    check: Callable[[Any], dict[str, Any] | None],
     write: bool = False,
-    echo: dict[str, Any] | None = None,
 ) -> tuple[Any, dict[str, Any] | None]:
     """One request with retries. Returns (response, None) or (None, failure envelope).
 
     Adds duration_ms and attempts (and the cause of a failure) to `meta` in place.
+    `check` (see reply_check) decides whether a reply belongs to this request.
     `write=True` sends the request at most once (see _retry_call) and sets
-    meta.outcome/request_sent; a reply that does not match `echo` (the fields
-    a Modbus write reply repeats) is "unknown", not "written".
+    meta.outcome/request_sent; a reply that does not match is "unknown", not
+    "written" or "rejected".
     """
     details: dict[str, Any] = {}
     result, err, duration_ms, attempts = await _retry_call(
-        ctx, app, op, call, write=write, details=details
+        ctx, app, op, call, write=write, details=details, check=check
     )
     meta.update(duration_ms=round(duration_ms, 3), attempts=attempts)
     if err is not None:
         meta.update(details)
         if write:
             request_sent = meta.pop("request_sent", None)
-            if err == WRITE_NO_REPLY:
+            if err in (WRITE_NO_REPLY, WRITE_REPLY_MISMATCH):
                 meta.update(outcome="unknown", request_sent=True)
             elif err.startswith("cannot reach device") or request_sent is False:
                 meta.update(outcome="not_sent", request_sent=False)
@@ -634,7 +781,7 @@ async def _request(
                 meta.update(outcome="unknown", request_sent=request_sent)
                 err += f"; {MAY_HAVE_BEEN_APPLIED}"
         return None, _make_result(False, error=err, meta=meta)
-    if _is_error(result):
+    if _is_error(result):  # an exception reply to THIS request (see reply_check)
         message, extra = _device_error(result)
         meta.update(extra)
         if write:
@@ -645,11 +792,6 @@ async def _request(
                 message += f"; {MAY_HAVE_BEEN_APPLIED}"
         return None, _make_result(False, error=message, meta=meta)
     if write:
-        mismatch = _echo_mismatch(result, echo or {})
-        if mismatch:
-            meta.update(outcome="unknown", request_sent=True, reply_mismatch=mismatch)
-            error = f"the device's reply does not match the write; {MAY_HAVE_BEEN_APPLIED}"
-            return None, _make_result(False, error=error, meta=meta)
         meta.update(outcome="written", request_sent=True)
     return result, None
 
@@ -679,11 +821,13 @@ async def _chunked_read(
     total_count: int,
     per_request_limit: int,
     attr: str,
+    function_code: int,
 ) -> tuple[list[Any] | None, str | None, dict[str, Any]]:
     """Read `total_count` registers or bits in requests of at most `per_request_limit`.
 
     - read_func: async function(start, size) -> pymodbus response
     - attr: response attribute to extract ("registers" or "bits")
+    - function_code: of the read, to check that each reply belongs to its request
 
     On failure the values read so far are returned in meta["partial"].
     """
@@ -701,19 +845,22 @@ async def _chunked_read(
         size = min(remaining, per_request_limit)
         op = f"{label}[{current}:{current + size - 1}]"
         details: dict[str, Any] = {}
+        check = reply_check(function_code, **{attr: size})
         result, err, duration_ms, attempts = await _retry_call(
-            ctx, app, op, functools.partial(read_func, current, size), details=details
+            ctx,
+            app,
+            op,
+            functools.partial(read_func, current, size),
+            details=details,
+            check=check,
         )
         if err is not None:
             return None, err, {"partial": values, "chunks": chunks, **details}
         if _is_error(result):
             message, extra = _device_error(result)
             return None, message, {"partial": values, "chunks": chunks, **extra}
-        chunk_vals = getattr(result, attr, None)
-        if chunk_vals is None or len(chunk_vals) < size:
-            return None, "Malformed response from device", {"partial": values, "chunks": chunks}
         # trim to the requested size: bit responses are padded to a multiple of 8
-        values.extend(list(chunk_vals)[:size])
+        values.extend(list(getattr(result, attr))[:size])
         chunks.append(
             {
                 "address": current,
@@ -793,6 +940,7 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     settings, tags = _config if _config is not None else load_config()
     gate = SendGate(lambda: getattr(server, "client_gone", False))
     client = _make_client(settings, gate)
+    gate.client = client
     try:
         await client.connect()
     except Exception as exc:  # e.g. a serial port that cannot be opened
@@ -811,6 +959,7 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
             settings=settings,
             tags=tags,
             frames_sent=lambda: gate.sent,
+            last_reply=lambda: bytes(gate.rx),
             closing=lambda: getattr(server, "client_gone", False),
         )
     finally:
@@ -919,8 +1068,14 @@ class ModbusMCP(FastMCP):
         tool = self._tool_manager.get_tool(name)
         if tool is None:
             return await super().call_tool(name, arguments)  # FastMCP: unknown tool
-        seconds = self._call_timeout()
-        state = _CallState.start(seconds)
+        state = _CallState.start(self._call_timeout())
+        result = await self._run_call(tool, name, arguments, state)
+        return result
+
+    async def _run_call(
+        self, tool: Any, name: str, arguments: dict[str, Any], state: _CallState
+    ) -> Any:
+        seconds = state.seconds
         if self.client_gone:
             state.cancelled = True
             envelope = self._unfinished(name, state, "the MCP client disconnected")
@@ -930,7 +1085,7 @@ class ModbusMCP(FastMCP):
         try:
             with scope:
                 return await run_with_deadline(seconds, self._call_tool(name, arguments), state)
-        except asyncio.TimeoutError:
+        except (TimeoutError, asyncio.TimeoutError):
             # The backstop: something outside _retry_call did not finish in time.
             state.cancelled = True
             why = f"did not finish within the {seconds:g} s deadline (MODBUS_CALL_TIMEOUT)"
@@ -1015,13 +1170,10 @@ async def read_register(address: Address, ctx: Context, slave_id: SlaveId = None
             address=address, count=1, **_unit(client, slave_id)
         )
 
-    result, failure = await _request(
-        ctx, app, f"read_register addr={address} slave={slave_id}", _call, meta
-    )
+    op = f"read_register addr={address} slave={slave_id}"
+    result, failure = await _request(ctx, app, op, _call, meta, check=reply_check(3, registers=1))
     if failure:
         return failure
-    if not getattr(result, "registers", None):
-        return _make_result(False, error="Malformed response from device", meta=meta)
     value = result.registers[0]
     await ctx.info(f"Read register {address} from slave {slave_id}: {value}")
     return _make_result(True, data={"value": value}, meta=meta)
@@ -1054,8 +1206,8 @@ async def write_register(
         return await client.write_register(address=address, value=value, **_unit(client, slave_id))
 
     op = f"write_register addr={address} value={value} slave={slave_id}"
-    echo = {"function_code": 6, "address": address, "registers": [value]}
-    _, failure = await _request(ctx, app, op, _call, meta, write=True, echo=echo)
+    check = reply_check(6, echo={"address": address, "registers": [value]})
+    _, failure = await _request(ctx, app, op, _call, meta, check=check, write=True)
     if failure:
         return failure
     await ctx.info(f"Wrote {value} to register {address} on slave {slave_id}")
@@ -1082,6 +1234,7 @@ async def read_coils(
         count,
         MAX_READ_BITS,
         "bits",
+        1,
     )
     meta = {"address": address, "count": count, "slave_id": slave_id, **meta}
     if err is not None:
@@ -1118,8 +1271,10 @@ async def write_coil(
         return await client.write_coil(address=address, value=value, **_unit(client, slave_id))
 
     op = f"write_coil addr={address} value={value} slave={slave_id}"
-    echo = {"function_code": 5, "address": address, "bits": [value]}
-    _, failure = await _request(ctx, app, op, _call, meta, write=True, echo=echo)
+    # pymodbus decodes any non-zero FC 5 echo as ON, so also check the raw reply.
+    pdu = struct.pack(">BHH", 5, address, 0xFF00 if value else 0x0000)
+    check = reply_check(5, echo={"address": address, "bits": [value]}, raw=(pdu, app.last_reply))
+    _, failure = await _request(ctx, app, op, _call, meta, check=check, write=True)
     if failure:
         return failure
     await ctx.info(f"Wrote {value} to coil {address} on slave {slave_id}")
@@ -1148,6 +1303,7 @@ async def read_input_registers(
         count,
         MAX_READ_REGISTERS,
         "registers",
+        4,
     )
     meta = {"address": address, "count": count, "slave_id": slave_id, **meta}
     if err is not None:
@@ -1178,6 +1334,7 @@ async def read_multiple_holding_registers(
         count,
         MAX_READ_REGISTERS,
         "registers",
+        3,
     )
     meta = {"address": address, "count": count, "slave_id": slave_id, **meta}
     if err is not None:
@@ -1250,6 +1407,7 @@ async def read_discrete_inputs(
         count,
         MAX_READ_BITS,
         "bits",
+        2,
     )
     meta = {"address": address, "count": count, "slave_id": slave_id, **meta}
     if err is not None:
@@ -1306,8 +1464,8 @@ async def write_registers(
         )
 
     op = f"write_registers addr={address} n={len(values)} slave={slave_id}"
-    echo = {"function_code": 16, "address": address, "count": len(values)}
-    _, failure = await _request(ctx, app, op, _call, meta, write=True, echo=echo)
+    check = reply_check(16, echo={"address": address, "count": len(values)})
+    _, failure = await _request(ctx, app, op, _call, meta, check=check, write=True)
     if failure:
         return failure
     await ctx.info(f"Wrote {len(values)} registers starting at {address} on slave {slave_id}")
@@ -1354,8 +1512,8 @@ async def write_coils_bulk(
         return await client.write_coils(address=address, values=values, **_unit(client, slave_id))
 
     op = f"write_coils addr={address} n={len(values)} slave={slave_id}"
-    echo = {"function_code": 15, "address": address, "count": len(values)}
-    _, failure = await _request(ctx, app, op, _call, meta, write=True, echo=echo)
+    check = reply_check(15, echo={"address": address, "count": len(values)})
+    _, failure = await _request(ctx, app, op, _call, meta, check=check, write=True)
     if failure:
         return failure
     await ctx.info(f"Wrote {len(values)} coils starting at {address} on slave {slave_id}")
@@ -1399,13 +1557,9 @@ async def mask_write_register(
         )
 
     op = f"mask_write_register addr={address} and={and_mask} or={or_mask} slave={slave_id}"
-    echo = {
-        "function_code": 22,
-        "address": address,
-        "and_mask": and_mask,
-        "or_mask": or_mask,
-    }
-    _, failure = await _request(ctx, app, op, _call, meta, write=True, echo=echo)
+    echo = {"address": address, "and_mask": and_mask, "or_mask": or_mask}
+    check = reply_check(22, echo=echo)
+    _, failure = await _request(ctx, app, op, _call, meta, check=check, write=True)
     if failure:
         return failure
     await ctx.info(f"Mask write register {address} on slave {slave_id}")
@@ -1448,7 +1602,7 @@ async def read_device_information(
         )
 
     op = f"read_device_information slave={slave_id} code={read_code} obj={object_id}"
-    result, failure = await _request(ctx, app, op, _call, meta)
+    result, failure = await _request(ctx, app, op, _call, meta, check=reply_check(0x2B))
     if failure:
         return failure
     information = getattr(result, "information", None) or {}
@@ -1503,6 +1657,7 @@ async def _read_typed(
         size * count,
         MAX_READ_REGISTERS,
         "registers",
+        3 if table == "holding" else 4,
     )
     if err is not None:
         return _make_result(False, error=err, meta={**base_meta, **meta})
@@ -1740,7 +1895,7 @@ async def ping(
 
     details: dict[str, Any] = {}
     result, probe_error, probe_ms, _ = await _retry_call(
-        ctx, app, "ping", _probe, max_retries=0, details=details
+        ctx, app, "ping", _probe, max_retries=0, details=details, check=reply_check(3, registers=1)
     )
     device_reachable = probe_error is None
     if probe_error is not None:

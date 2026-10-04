@@ -276,3 +276,21 @@ async def test_one_deadline_covers_every_request_of_a_call() -> None:
     reads = [t for t, fc, _ in device.arrivals if fc == 3]
     assert len(reads) == 3, device.arrivals  # the third went out, nothing after it
     assert all(t <= started + 2.0 + 0.2 for t in reads), (started, reads)
+
+
+async def test_a_read_pending_at_disconnect_ends_quietly() -> None:
+    """A read waiting on a hung device when stdin closes: no "Task exception was never
+    retrieved" (asyncio.wait_for's inner task on Python 3.10), no traceback, exit 0."""
+    hold = asyncio.Event()
+    async with DropWriteRepliesDevice(hold=hold) as device:
+        client = await RawClient.start(device.port)
+        try:
+            await client.call("read_register", address=0)
+            await asyncio.sleep(0.5)  # the device has the read and does not answer
+            client.proc.stdin.close()
+        finally:
+            exited, stderr = await client.close()
+            hold.set()
+    assert "never retrieved" not in stderr, stderr
+    assert "Traceback" not in stderr, stderr
+    assert exited == 0, stderr

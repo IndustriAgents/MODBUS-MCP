@@ -143,11 +143,13 @@ def test_reads_past_the_address_space_are_refused_before_sending(client, ctx) ->
 
 def test_short_response_is_not_reported_as_success(client, ctx) -> None:
     async def short(address, *, count=1, device_id=1):
-        return FakeResponse(registers=[1])
+        return FakeResponse(registers=[1], function_code=4)
 
     client.read_input_registers = short
     result = run(cli.read_input_registers(0, 4, ctx))
-    assert result["success"] is False and "Malformed" in result["error"]
+    assert result["success"] is False
+    assert result["error"] == "the device's reply does not match the request"
+    assert result["meta"]["reply_mismatch"] == {"registers": {"expected": 4, "got": 1}}
 
 
 def test_chunked_reads_split_at_protocol_limits(client, ctx) -> None:

@@ -147,6 +147,8 @@ class DropWriteRepliesDevice:
         # A write reply echoes the function code, the address and the value
         # (FC 5/6), the count (FC 15/16) or the masks (FC 22).
         echo = bytes([fc]) + data[: 6 if fc == 22 else 4]
+        if self.write_reply == "coil_ff01" and fc == 5:
+            return echo[:3] + b"\xff\x01"  # pymodbus decodes this as ON too
         if self.write_reply == "bad_echo":
             if fc == 5:  # report the other coil state (pymodbus reads 0xFF01 as ON too)
                 echo = echo[:3] + (b"\x00\x00" if echo[3:5] == b"\xff\x00" else b"\xff\x00")
@@ -270,3 +272,15 @@ async def test_a_peer_that_answers_garbage_cannot_hang_a_call(tmp_path) -> None:
 
             ping = await srv.call("ping")
             assert ping["success"] is False and ping["data"]["device_reachable"] is False
+
+
+async def test_a_malformed_coil_echo_is_unknown(tmp_path) -> None:
+    """A coil write answered with 0xFF01 instead of 0xFF00: pymodbus decodes it as ON,
+    but it is not the echo Modbus specifies, so the write is "unknown"."""
+    async with DropWriteRepliesDevice(write_reply="coil_ff01") as device:
+        target = SimpleNamespace(host=device.host, port=device.port)
+        async with server(target, tmp_path, MODBUS_WRITES_ENABLED="true") as srv:
+            result = await srv.call("write_coil", address=3, value=True)
+            assert result["meta"]["outcome"] == "unknown", result
+            assert "raw_reply" in result["meta"]["reply_mismatch"]
+            assert device.received[(5, 3)] == 1

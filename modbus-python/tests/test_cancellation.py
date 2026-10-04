@@ -125,3 +125,24 @@ def test_disconnect_while_waiting_for_a_reply_is_unknown(client, connected_app) 
     result = asyncio.run(scenario())
     assert result["meta"]["outcome"] == "unknown" and result["meta"]["request_sent"] is True
     assert result["error"].endswith("the write may have been applied; check before retrying")
+
+
+def test_the_gate_refuses_a_frame_when_the_connection_is_gone() -> None:
+    """pymodbus drops a frame silently when its transport is gone; counting it as sent
+    would report a write that never left as "unknown"."""
+    from conftest import free_port
+
+    from modbus_mcp.config import Settings
+
+    async def scenario():
+        gate = cli.SendGate()
+        client = cli._make_client(Settings(port=free_port()), gate)
+        gate.client = client
+        try:
+            with pytest.raises(cli.NotConnected):
+                gate(True, b"frame")  # never connected: no transport
+            return gate.sent
+        finally:
+            client.close()
+
+    assert asyncio.run(scenario()) == 0
