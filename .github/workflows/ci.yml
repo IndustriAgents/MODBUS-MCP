@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# Cheap, deterministic checks only: nothing here needs a running Modbus device.
+# Both uv projects commit their uv.lock and are installed with --locked, so CI
+# fails if a lockfile drifts from its pyproject.toml. The MCP server only works
+# with the versions its lockfile pins (see CONTRIBUTING.md), so --locked is what
+# keeps CI honest about what users actually get.
+jobs:
+  server:
+    name: MCP server (modbus-python)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: modbus-python
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install dependencies from uv.lock
+        run: uv sync --locked
+
+      - name: Byte-compile sources
+        run: uv run --locked python -m compileall -q src
+
+      # `modbus-mcp` has no --help, and it only serves a client once it has
+      # reached a device (with none, it exits when a client connects). So check
+      # what can be checked without one: the package imports, every tool
+      # registers, and the console script resolves.
+      - name: Import package, list registered tools, resolve entry point
+        run: |
+          uv run --locked python - <<'EOF'
+          import asyncio
+          from importlib.metadata import entry_points
+
+          from modbus_mcp.cli import mcp
+
+          tools = sorted(t.name for t in asyncio.run(mcp.list_tools()))
+          print(f"{len(tools)} tools registered: {', '.join(tools)}")
+          missing = {"ping", "read_register", "read_input_registers", "read_coils"} - set(tools)
+          assert not missing, f"core tools missing: {missing}"
+
+          (ep,) = entry_points(group="console_scripts", name="modbus-mcp")
+          assert callable(ep.load()), ep
+          print("console script modbus-mcp ->", ep.value)
+          EOF
+
+  mock:
+    name: Mock device (modbus-mock-server)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: modbus-mock-server
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install dependencies from uv.lock
+        run: uv sync --locked
+
+      - name: Byte-compile sources
+        run: uv run --locked python -m compileall -q modbus_local_server.py
+
+      # Builds the simulated datastore without binding a port, which catches a
+      # pymodbus upgrade that breaks the mock before anyone tries to start it.
+      - name: Import module, build datastore, resolve entry point
+        run: |
+          uv run --locked python - <<'EOF'
+          from importlib.metadata import entry_points
+
+          import modbus_local_server
+
+          modbus_local_server.build_context()
+          print("datastore built")
+
+          (ep,) = entry_points(group="console_scripts", name="modbus-mock-server")
+          assert callable(ep.load()), ep
+          print("console script modbus-mock-server ->", ep.value)
+          EOF

@@ -1,0 +1,35 @@
+name: Notify IndustriConnect
+
+# Tells IndustriAgents/IndustriConnect that main moved, so it can bump its
+# MODBUS-Project submodule pointer without waiting for its nightly cron.
+#
+# The receiver is IndustriConnect's .github/workflows/sync-submodules.yml, which
+# listens for repository_dispatch type protocol-mcp-updated with { repo, sha }.
+# GitHub accepts a dispatch (204) even when no workflow on the default branch
+# listens for it, so add the INDUSTRICONNECT_DISPATCH_TOKEN secret here only once
+# sync-submodules.yml is on IndustriConnect's main. Until the secret exists, this
+# job logs a warning and does nothing.
+on:
+  push:
+    branches: [main]
+
+# The job calls the API with the PAT secret, never GITHUB_TOKEN, so that token
+# gets no permissions.
+permissions: {}
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch submodule sync
+        env:
+          GH_TOKEN: ${{ secrets.INDUSTRICONNECT_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::INDUSTRICONNECT_DISPATCH_TOKEN not set; skipping."
+            exit 0
+          fi
+          gh api repos/IndustriAgents/IndustriConnect/dispatches \
+            -f event_type=protocol-mcp-updated \
+            -f 'client_payload[repo]=${{ github.repository }}' \
+            -f 'client_payload[sha]=${{ github.sha }}'
