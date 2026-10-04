@@ -198,3 +198,28 @@ async def test_a_cancelled_write_queued_behind_a_hung_request_is_never_sent() ->
             assert later["success"] is True
         finally:
             await client.close()
+
+
+async def test_a_client_that_vanishes_entirely_is_a_clean_end() -> None:
+    """The client closes stdin AND stops reading stdout while a write is pending: the
+    reply cannot be delivered, which is a normal end (exit 0, no traceback), and the
+    write never reaches the device that appears afterwards."""
+    port = free_port()
+    client = await RawClient.start(port, **RECONNECTING)
+    await client.call("write_register", address=1, value=5)
+    await asyncio.sleep(0.8)  # it is retrying the connection
+    client.reader.cancel()
+    client.proc.stdout._transport.close()  # nobody reads the replies any more
+    client.proc.stdin.close()
+    async with DropWriteRepliesDevice(write_reply="echo", port=port) as device:
+        try:
+            await asyncio.wait_for(client.proc.wait(), 15)
+        finally:
+            if client.proc.returncode is None:
+                client.proc.kill()
+                await client.proc.wait()
+        await asyncio.sleep(1)
+        assert sum(device.received.values()) == 0, device.received
+    stderr = (await client.proc.stderr.read()).decode(errors="replace")
+    assert client.proc.returncode == 0, stderr
+    assert "Traceback" not in stderr, stderr
