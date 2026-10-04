@@ -1,6 +1,9 @@
 import asyncio
+import functools
+import inspect
 import os
 import json
+import math
 import time
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
@@ -12,11 +15,11 @@ from pymodbus.client import (
     AsyncModbusUdpClient,
     AsyncModbusSerialClient,
 )
-from pymodbus.payload import BinaryPayloadDecoder, BinaryPayloadBuilder
-from pymodbus.constants import Endian
 from pymodbus.exceptions import ModbusException
 from mcp.server.fastmcp import FastMCP, Context
 from mcp.server.fastmcp.prompts import base
+
+from . import codec
 
 from dotenv import load_dotenv
 
@@ -192,86 +195,38 @@ async def _chunked_read(
     return values, None, {"chunks": chunks}
 
 
-# Typed decode/encode utilities
-_DTYPE_SIZES = {
-    "int16": 1,
-    "uint16": 1,
-    "int32": 2,
-    "uint32": 2,
-    "float32": 2,
-    "int64": 4,
-    "uint64": 4,
-    "float64": 4,
-}
+# pymodbus renamed the unit-id keyword from `slave` (up to 3.9) to `device_id`
+# (3.10 and later); everything else this server calls is the same in both.
+@functools.lru_cache(maxsize=None)
+def _unit_kwarg_for(client_type: type) -> str:
+    try:
+        params = inspect.signature(client_type.read_holding_registers).parameters
+    except (AttributeError, TypeError, ValueError):
+        return "device_id"
+    return "slave" if "slave" in params and "device_id" not in params else "device_id"
 
 
-def _to_endian(v: str) -> Endian:
-    return Endian.Big if str(v).lower() in {"b", "big", ">"} else Endian.Little
+def _unit(client: Any, slave_id: int) -> Dict[str, int]:
+    """Keyword argument that addresses `slave_id` on this pymodbus version."""
+    return {_unit_kwarg_for(type(client)): slave_id}
 
 
-def _decode_values(
-    registers: List[int],
-    dtype: str,
-    count: int,
-    byteorder: str,
-    wordorder: str,
-) -> List[Any]:
-    size = _DTYPE_SIZES.get(dtype)
-    if not size:
-        raise ValueError(f"Unsupported dtype: {dtype}")
-    expected_regs = size * count
-    if len(registers) < expected_regs:
-        raise ValueError(
-            f"Insufficient registers: have {len(registers)}, need {expected_regs} for {count} {dtype}"
-        )
-    dec = BinaryPayloadDecoder.fromRegisters(
-        registers[:expected_regs], byteorder=_to_endian(byteorder), wordorder=_to_endian(wordorder)
-    )
-    vals: List[Any] = []
-    for _ in range(count):
-        if dtype == "int16":
-            vals.append(dec.decode_16bit_int())
-        elif dtype == "uint16":
-            vals.append(dec.decode_16bit_uint())
-        elif dtype == "int32":
-            vals.append(dec.decode_32bit_int())
-        elif dtype == "uint32":
-            vals.append(dec.decode_32bit_uint())
-        elif dtype == "float32":
-            vals.append(dec.decode_32bit_float())
-        elif dtype == "int64":
-            vals.append(dec.decode_64bit_int())
-        elif dtype == "uint64":
-            vals.append(dec.decode_64bit_uint())
-        elif dtype == "float64":
-            vals.append(dec.decode_64bit_float())
-        else:
-            raise ValueError(f"Unsupported dtype: {dtype}")
-    return vals
+def _json_number(value: Any) -> Any:
+    """JSON has no NaN or infinity; spell a non-finite float out instead of emitting invalid JSON."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return "NaN" if math.isnan(value) else ("Infinity" if value > 0 else "-Infinity")
+    return value
 
 
-def _encode_values(values: List[Any], dtype: str, byteorder: str, wordorder: str) -> List[int]:
-    b = BinaryPayloadBuilder(byteorder=_to_endian(byteorder), wordorder=_to_endian(wordorder))
-    for v in values:
-        if dtype == "int16":
-            b.add_16bit_int(int(v))
-        elif dtype == "uint16":
-            b.add_16bit_uint(int(v))
-        elif dtype == "int32":
-            b.add_32bit_int(int(v))
-        elif dtype == "uint32":
-            b.add_32bit_uint(int(v))
-        elif dtype == "float32":
-            b.add_32bit_float(float(v))
-        elif dtype == "int64":
-            b.add_64bit_int(int(v))
-        elif dtype == "uint64":
-            b.add_64bit_uint(int(v))
-        elif dtype == "float64":
-            b.add_64bit_float(float(v))
-        else:
-            raise ValueError(f"Unsupported dtype: {dtype}")
-    return b.to_registers()
+def _apply_scale(values: List[Any], scale: float, offset: float) -> List[Any]:
+    """Apply `value * scale + offset`, leaving raw values untouched when that is the identity.
+
+    Converting unscaled integers to float would silently lose precision for 64-bit values.
+    """
+    if scale != 1 or offset != 0:
+        values = [v * float(scale) + float(offset) for v in values]
+    return [_json_number(v) for v in values]
+
 
 # Lifespan manager for Modbus client
 @asynccontextmanager
@@ -326,7 +281,7 @@ async def read_register(address: int, ctx: Context, slave_id: int = MODBUS_DEFAU
     client = ctx.request_context.lifespan_context.modbus_client
     op = f"read_register addr={address} slave={slave_id}"
     async def _call():
-        return await client.read_holding_registers(address=address, count=1, slave=slave_id)
+        return await client.read_holding_registers(address=address, count=1, **_unit(client, slave_id))
     result, err, duration_ms, attempts = await _retry_call(ctx, op, _call, MODBUS_MAX_RETRIES, MODBUS_TOOL_TIMEOUT, client=client)
     if err is not None:
         return _make_result(False, error=err, meta={"address": address, "slave_id": slave_id, "duration_ms": round(duration_ms, 3), "attempts": attempts})
@@ -356,7 +311,7 @@ async def write_register(address: int, value: int, ctx: Context, slave_id: int =
     client = ctx.request_context.lifespan_context.modbus_client
     op = f"write_register addr={address} value={value} slave={slave_id}"
     async def _call():
-        return await client.write_register(address=address, value=value, slave=slave_id)
+        return await client.write_register(address=address, value=value, **_unit(client, slave_id))
     result, err, duration_ms, attempts = await _retry_call(ctx, op, _call, MODBUS_MAX_RETRIES, MODBUS_TOOL_TIMEOUT, client=client)
     if err is not None:
         return _make_result(False, error=err, meta={"address": address, "value": value, "slave_id": slave_id, "duration_ms": round(duration_ms, 3), "attempts": attempts})
@@ -383,7 +338,7 @@ async def read_coils(address: int, count: int, ctx: Context, slave_id: int = MOD
     values, err, meta = await _chunked_read(
         ctx,
         "read_coils",
-        lambda start, size: client.read_coils(address=start, count=size, slave=slave_id),
+        lambda start, size: client.read_coils(address=start, count=size, **_unit(client, slave_id)),
         address,
         count,
         2000,
@@ -414,7 +369,7 @@ async def write_coil(address: int, value: bool, ctx: Context, slave_id: int = MO
     client = ctx.request_context.lifespan_context.modbus_client
     op = f"write_coil addr={address} value={value} slave={slave_id}"
     async def _call():
-        return await client.write_coil(address=address, value=value, slave=slave_id)
+        return await client.write_coil(address=address, value=value, **_unit(client, slave_id))
     result, err, duration_ms, attempts = await _retry_call(ctx, op, _call, MODBUS_MAX_RETRIES, MODBUS_TOOL_TIMEOUT, client=client)
     if err is not None:
         return _make_result(False, error=err, meta={"address": address, "value": value, "slave_id": slave_id, "duration_ms": round(duration_ms, 3), "attempts": attempts})
@@ -441,7 +396,7 @@ async def read_input_registers(address: int, count: int, ctx: Context, slave_id:
     values, err, meta = await _chunked_read(
         ctx,
         "read_input_registers",
-        lambda start, size: client.read_input_registers(address=start, count=size, slave=slave_id),
+        lambda start, size: client.read_input_registers(address=start, count=size, **_unit(client, slave_id)),
         address,
         count,
         125,
@@ -472,7 +427,7 @@ async def read_multiple_holding_registers(address: int, count: int, ctx: Context
     values, err, meta = await _chunked_read(
         ctx,
         "read_holding_registers",
-        lambda start, size: client.read_holding_registers(address=start, count=size, slave=slave_id),
+        lambda start, size: client.read_holding_registers(address=start, count=size, **_unit(client, slave_id)),
         address,
         count,
         125,
@@ -517,7 +472,7 @@ async def read_discrete_inputs(address: int, count: int, ctx: Context, slave_id:
     values, err, meta = await _chunked_read(
         ctx,
         "read_discrete_inputs",
-        lambda start, size: client.read_discrete_inputs(address=start, count=size, slave=slave_id),
+        lambda start, size: client.read_discrete_inputs(address=start, count=size, **_unit(client, slave_id)),
         address,
         count,
         2000,
@@ -551,7 +506,7 @@ async def write_registers(address: int, values: List[int], ctx: Context, slave_i
     client = ctx.request_context.lifespan_context.modbus_client
     op = f"write_registers addr={address} n={len(values)} slave={slave_id}"
     async def _call():
-        return await client.write_registers(address=address, values=values, slave=slave_id)
+        return await client.write_registers(address=address, values=values, **_unit(client, slave_id))
     result, err, duration_ms, attempts = await _retry_call(ctx, op, _call, MODBUS_MAX_RETRIES, MODBUS_TOOL_TIMEOUT, client=client)
     if err is not None:
         return _make_result(False, error=err, meta={"address": address, "count": len(values), "slave_id": slave_id, "duration_ms": round(duration_ms, 3), "attempts": attempts})
@@ -573,7 +528,7 @@ async def write_coils_bulk(address: int, values: List[bool], ctx: Context, slave
     client = ctx.request_context.lifespan_context.modbus_client
     op = f"write_coils addr={address} n={len(values)} slave={slave_id}"
     async def _call():
-        return await client.write_coils(address=address, values=values, slave=slave_id)
+        return await client.write_coils(address=address, values=values, **_unit(client, slave_id))
     result, err, duration_ms, attempts = await _retry_call(ctx, op, _call, MODBUS_MAX_RETRIES, MODBUS_TOOL_TIMEOUT, client=client)
     if err is not None:
         return _make_result(False, error=err, meta={"address": address, "count": len(values), "slave_id": slave_id, "duration_ms": round(duration_ms, 3), "attempts": attempts})
@@ -593,7 +548,7 @@ async def mask_write_register(address: int, and_mask: int, or_mask: int, ctx: Co
     client = ctx.request_context.lifespan_context.modbus_client
     op = f"mask_write_register addr={address} and={and_mask} or={or_mask} slave={slave_id}"
     async def _call():
-        return await client.mask_write_register(address=address, and_mask=and_mask, or_mask=or_mask, slave=slave_id)
+        return await client.mask_write_register(address=address, and_mask=and_mask, or_mask=or_mask, **_unit(client, slave_id))
     result, err, duration_ms, attempts = await _retry_call(ctx, op, _call, MODBUS_MAX_RETRIES, MODBUS_TOOL_TIMEOUT, client=client)
     if err is not None:
         return _make_result(False, error=err, meta={"address": address, "and_mask": and_mask, "or_mask": or_mask, "slave_id": slave_id, "duration_ms": round(duration_ms, 3), "attempts": attempts})
@@ -612,13 +567,9 @@ async def read_device_information(ctx: Context, slave_id: int = MODBUS_DEFAULT_S
     op = f"read_device_information slave={slave_id} code={read_code} obj={object_id}"
 
     async def _call():
-        # Try both possible method names across pymodbus versions
-        if hasattr(client, "read_device_information"):
-            return await client.read_device_information(slave=slave_id, read_code=read_code, object_id=object_id)
-        elif hasattr(client, "read_device_identification"):
-            return await client.read_device_identification(slave=slave_id, read_code=read_code, object_id=object_id)
-        else:
-            raise AttributeError("Client does not support device information")
+        return await client.read_device_information(
+            read_code=read_code, object_id=object_id, **_unit(client, slave_id)
+        )
 
     result, err, duration_ms, attempts = await _retry_call(ctx, op, _call, MODBUS_MAX_RETRIES, MODBUS_TOOL_TIMEOUT, client=client)
     if err is not None:
@@ -655,15 +606,18 @@ async def read_holding_typed(
     """
     Read holding registers and decode as typed values.
     """
-    size = _DTYPE_SIZES.get(dtype)
-    if not size:
-        return _make_result(False, error=f"Unsupported dtype: {dtype}")
+    try:
+        size = codec.register_count(dtype)
+        byteorder = codec.check_order(byteorder, "byteorder")
+        wordorder = codec.check_order(wordorder, "wordorder")
+    except codec.CodecError as e:
+        return _make_result(False, error=str(e))
     total = size * max(count, 1)
     client = ctx.request_context.lifespan_context.modbus_client
     regs, err, meta = await _chunked_read(
         ctx,
         "read_holding_registers",
-        lambda start, sz: client.read_holding_registers(address=start, count=sz, slave=slave_id),
+        lambda start, sz: client.read_holding_registers(address=start, count=sz, **_unit(client, slave_id)),
         address,
         total,
         125,
@@ -674,8 +628,7 @@ async def read_holding_typed(
     if err is not None:
         return _make_result(False, error=err, meta={"address": address, "count": count, "dtype": dtype, "slave_id": slave_id, **meta})
     try:
-        vals = _decode_values(regs, dtype, count, byteorder, wordorder)
-        vals = [v * float(scale) + float(offset) for v in vals]
+        vals = _apply_scale(codec.decode(regs, dtype, count, byteorder, wordorder), scale, offset)
     except Exception as e:
         return _make_result(False, error=str(e), meta={"address": address, "count": count, "dtype": dtype, "slave_id": slave_id})
     return _make_result(True, data={"values": vals}, meta={"address": address, "count": count, "dtype": dtype, "byteorder": byteorder, "wordorder": wordorder, "scale": scale, "offset": offset, "slave_id": slave_id, **meta})
@@ -696,15 +649,18 @@ async def read_input_typed(
     """
     Read input registers and decode as typed values.
     """
-    size = _DTYPE_SIZES.get(dtype)
-    if not size:
-        return _make_result(False, error=f"Unsupported dtype: {dtype}")
+    try:
+        size = codec.register_count(dtype)
+        byteorder = codec.check_order(byteorder, "byteorder")
+        wordorder = codec.check_order(wordorder, "wordorder")
+    except codec.CodecError as e:
+        return _make_result(False, error=str(e))
     total = size * max(count, 1)
     client = ctx.request_context.lifespan_context.modbus_client
     regs, err, meta = await _chunked_read(
         ctx,
         "read_input_registers",
-        lambda start, sz: client.read_input_registers(address=start, count=sz, slave=slave_id),
+        lambda start, sz: client.read_input_registers(address=start, count=sz, **_unit(client, slave_id)),
         address,
         total,
         125,
@@ -715,8 +671,7 @@ async def read_input_typed(
     if err is not None:
         return _make_result(False, error=err, meta={"address": address, "count": count, "dtype": dtype, "slave_id": slave_id, **meta})
     try:
-        vals = _decode_values(regs, dtype, count, byteorder, wordorder)
-        vals = [v * float(scale) + float(offset) for v in vals]
+        vals = _apply_scale(codec.decode(regs, dtype, count, byteorder, wordorder), scale, offset)
     except Exception as e:
         return _make_result(False, error=str(e), meta={"address": address, "count": count, "dtype": dtype, "slave_id": slave_id})
     return _make_result(True, data={"values": vals}, meta={"address": address, "count": count, "dtype": dtype, "byteorder": byteorder, "wordorder": wordorder, "scale": scale, "offset": offset, "slave_id": slave_id, **meta})
@@ -805,12 +760,8 @@ async def write_tag(
         wordorder = spec.get("wordorder", "big")
         # value could be scalar or list
         vals = value if isinstance(value, list) else [value]
-        if dtype == "uint16":
-            for i, v in enumerate(vals):
-                if not (0 <= int(v) <= 65535):
-                    return _make_result(False, error=f"Value {v} at index {i} out of uint16 range (0-65535)", meta={"tag": name, "index": i, "value": v})
         try:
-            regs = _encode_values(vals, dtype, byteorder, wordorder)
+            regs = codec.encode(vals, dtype, byteorder, wordorder)
         except Exception as e:
             return _make_result(False, error=str(e))
         return await write_registers(addr, regs, ctx, slave_id)
@@ -837,7 +788,7 @@ async def ping(ctx: Context, slave_id: int = MODBUS_DEFAULT_SLAVE_ID) -> Dict[st
     probe_error: Optional[str] = None
 
     async def _probe():
-        return await client.read_holding_registers(address=0, count=1, slave=slave_id)
+        return await client.read_holding_registers(address=0, count=1, **_unit(client, slave_id))
 
     probe_result, probe_err, probe_ms, _ = await _retry_call(
         ctx, "ping_probe", _probe, 0, MODBUS_TOOL_TIMEOUT, client=client
