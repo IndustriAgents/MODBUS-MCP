@@ -18,12 +18,13 @@
 ## Does this change what can be written to a device?
 
 - [ ] No
-- [ ] Yes — describe the new capability and how it is gated:
+- [ ] Yes — describe the new capability. It must refuse to send anything unless `MODBUS_WRITES_ENABLED=true` (off by default):
 
 ## Checklist
 
-- [ ] Tools still return the shared `{ success, data, error, meta }` envelope.
+- [ ] Tools still return the shared `{ success, data, error, meta }` envelope, also for invalid arguments and device errors.
 - [ ] The mock device can exercise the change, and I tested against it.
+- [ ] `uv run pytest`, `uv run ruff check` and `uv run ruff format --check` pass (in each project I touched), and the change has a test that fails without it.
 - [ ] Nothing was tested against production equipment.
 - [ ] `stdout` is still clean — all logging goes to `stderr`.
 - [ ] If I changed dependencies, I ran `uv lock` and committed the `uv.lock`; `uv sync --locked` passes.

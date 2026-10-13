@@ -1,18 +1,54 @@
 [project]
 name = "modbus-mcp"
 version = "0.1.0"
-description = "An MCP server that standardizes and contextualizes Modbus data, enabling seamless integration of AI agents with industrial IoT systems.e"
+description = "An MCP server that standardizes and contextualizes Modbus data, enabling seamless integration of AI agents with industrial IoT systems."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "mcp[cli]>=1.6.0",
-    "pymodbus>=3.9.2",
+    # mcp 2.x removed mcp.server.fastmcp, which this server is built on. Up to
+    # 1.12.2 a client's notifications/cancelled left the session unable to answer
+    # any later request (checked with a stock FastMCP server); 1.12.3 is the first
+    # release where cancelling a call works. Tool annotations need >= 1.7.0.
+    "mcp[cli]>=1.12.3,<2",
+    # Tested with every pymodbus minor release from 3.9.2 to 3.15; 3.10 renamed
+    # the unit-id keyword (slave -> device_id), which cli.py handles at runtime.
+    # The serial extra (pyserial) is what MODBUS_TYPE=serial needs.
+    "pymodbus[serial]>=3.9.2,<3.16",
     "python-dotenv>=1.1.0",
+    # Imported directly by cli.py; the floors are mcp 1.12.3's own.
+    "anyio>=4.5",
+    "pydantic>=2.8.0,<3",
+    # BaseExceptionGroup on Python 3.10 (anyio raises the backport's groups there).
+    "exceptiongroup>=1.0.2; python_version < '3.11'",
 ]
 
 [project.scripts]
 modbus-mcp = "modbus_mcp.cli:main"
 
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.16",
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "integration: starts the mock device (and the MCP server) as subprocesses; needs uv",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+# T20: no print() in the server - stdout is the MCP JSON-RPC channel.
+select = ["E", "F", "W", "I", "B", "UP", "T20"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["T20"]
