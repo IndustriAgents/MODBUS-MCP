@@ -9,7 +9,7 @@ import pytest
 from conftest import FakeResponse, make_ctx, run
 from mcp.server.fastmcp.exceptions import ToolError
 
-from modbus_mcp import cli
+from modbus_mcp import cli, codec
 
 
 def call(name: str, arguments: dict) -> dict:
@@ -103,7 +103,7 @@ def test_unknown_tools_are_still_protocol_errors() -> None:
 
 def test_every_tool_has_a_description_and_documented_parameters() -> None:
     tools = asyncio.run(cli.mcp.list_tools())
-    assert len(tools) == 17
+    assert len(tools) == 6
     for tool in tools:
         assert tool.description and tool.description.strip(), tool.name
         props = tool.inputSchema.get("properties", {})
@@ -111,9 +111,9 @@ def test_every_tool_has_a_description_and_documented_parameters() -> None:
         for pname, schema in props.items():
             assert schema.get("description"), (tool.name, pname)
     by_name = {t.name: t for t in tools}
-    slave = by_name["read_register"].inputSchema["properties"]["slave_id"]
+    slave = by_name["read_values"].inputSchema["oneOf"][0]["properties"]["slave_id"]
     assert {"type": "null"} in slave["anyOf"]
-    address = by_name["read_register"].inputSchema["properties"]["address"]
+    address = by_name["read_values"].inputSchema["oneOf"][0]["properties"]["address"]
     assert (address["minimum"], address["maximum"]) == (0, 65535)
 
 
@@ -217,11 +217,11 @@ def test_schemas_use_standard_json_schema_keywords() -> None:
 def check_annotations(tools) -> None:
     """Write tools are destructive and never idempotent; every other tool is read-only."""
     names = {tool.name for tool in tools}
-    assert cli.WRITE_TOOLS <= names
+    assert {"write_values", "mask_write_register"} <= names
     for tool in tools:
         hints = tool.annotations
         assert hints is not None, tool.name
-        if tool.name in cli.WRITE_TOOLS:
+        if tool.name in {"write_values", "mask_write_register"}:
             assert hints.readOnlyHint is False, tool.name
             assert hints.destructiveHint is True, tool.name
             assert hints.idempotentHint is False, tool.name
@@ -241,7 +241,7 @@ def test_an_unexpected_error_before_anything_was_sent_is_not_sent(client, monkey
     def explode(*args, **kwargs):
         raise RuntimeError("encoder exploded")
 
-    monkeypatch.setattr(cli.codec, "encode", explode)
+    monkeypatch.setattr(codec, "encode", explode)
     envelope = call("write_tag", {"name": "Speed", "value": 1.5})
     assert envelope["success"] is False
     assert envelope["error"] == "Unexpected RuntimeError: encoder exploded"

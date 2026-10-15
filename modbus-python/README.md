@@ -1,3 +1,10 @@
+> **0.3.0 package and tool migration:** Install `industriagents-modbus-mcp`
+> from npm (requires uv) or PyPI; the command remains `modbus-mcp`.
+> The advertised catalog now contains **6 tools**. Older tool names in
+> the examples below remain compatibility calls. See the
+> [architecture and canonical tool guide](../docs/architecture.md)
+> and [release guide](../docs/release.md).
+
 # Modbus MCP Server (Python)
 
 The MCP server of [MODBUS-MCP](../README.md). It is a [uv](https://docs.astral.sh/uv/) project with the `modbus-mcp` entry point; the mock device to test it against lives in [`../modbus-mock-server`](../modbus-mock-server/README.md).

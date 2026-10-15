@@ -3,6 +3,6 @@
 from importlib.metadata import PackageNotFoundError, version
 
 try:
-    __version__ = version("modbus-mcp")
+    __version__ = version("industriagents-modbus-mcp")
 except PackageNotFoundError:  # a source tree that has not been installed
-    __version__ = "0.0.0+unknown"
+    __version__ = "0.3.0"

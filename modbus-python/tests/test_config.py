@@ -238,7 +238,9 @@ def test_no_implicit_env_for_an_installed_package_or_another_project(tmp_path) -
     # Installed (not under src/), even next to a pyproject.toml that names us.
     lookalike = tmp_path / "c" / "lib" / "site-packages" / "modbus_mcp"
     lookalike.mkdir(parents=True)
-    (lookalike.parent.parent / "pyproject.toml").write_text('[project]\nname = "modbus-mcp"\n')
+    (lookalike.parent.parent / "pyproject.toml").write_text(
+        '[project]\nname = "industriagents-modbus-mcp"\n'
+    )
     (lookalike.parent.parent / ".env").write_text("MODBUS_PORT=1\n")
     assert cli.implicit_dotenv(lookalike) is None
 

@@ -22,13 +22,13 @@ PYPROJECT = Path(__file__).resolve().parents[1] / "pyproject.toml"
 def test_description_has_no_stray_characters() -> None:
     description = tomllib.loads(PYPROJECT.read_text())["project"]["description"]
     assert description.endswith("industrial IoT systems.")
-    assert metadata("modbus-mcp")["Summary"] == description
+    assert metadata("industriagents-modbus-mcp")["Summary"] == description
 
 
 def test_server_info_reports_the_package_version_not_the_sdk_version() -> None:
     options = cli.mcp._mcp_server.create_initialization_options()
     assert options.server_name == "Modbus MCP Server"
-    assert options.server_version == version("modbus-mcp") == modbus_mcp.__version__
+    assert options.server_version == version("industriagents-modbus-mcp") == modbus_mcp.__version__
     assert options.server_version != version("mcp")
 
 

@@ -82,7 +82,9 @@ def test_the_backstop_ends_a_call_that_ignores_the_deadline(client, monkeypatch)
     async def stuck(*args, **kwargs):
         await asyncio.sleep(6)  # longer than deadline + backstop; then it would "finish"
 
-    monkeypatch.setattr(cli, "_retry_call", stuck)
+    from modbus_mcp.application import request
+
+    monkeypatch.setattr(request, "_retry_call", stuck)
     monkeypatch.setattr(cli.ModbusMCP, "_call_timeout", lambda self: 0.2)
     for tool, arguments, outcome in [
         ("read_register", {"address": 0}, None),

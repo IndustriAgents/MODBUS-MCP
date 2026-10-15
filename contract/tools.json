@@ -1,0 +1,1834 @@
+{
+  "schemaVersion": 1,
+  "protocol": "modbus",
+  "transport": "stdio",
+  "tools": [
+    {
+      "name": "read_values",
+      "description": "Select one source mode and provide only its parameters.\n\nholding: Read holding registers (function 3); data.registers is a list of raw 16-bit values.\n\n    Counts above 125 are split into several requests.\n    \n\ninput: Read input registers (function 4); data.registers is a list of raw 16-bit values.\n\n    Counts above 125 are split into several requests.\n    \n\ncoils: Read coils (function 1); data.values is a list of booleans.\n\n    Counts above 2000 are split into several requests.\n    \n\ndiscrete: Read discrete inputs (function 2); data.values is a list of booleans.\n\n    Counts above 2000 are split into several requests.\n    \n\nholding_typed: Read holding registers and decode them as typed values.\n\n    data.values holds `count` values of `dtype`, each multiplied by `scale` and\n    increased by `offset`. NaN and infinities come back as the strings \"NaN\",\n    \"Infinity\" and \"-Infinity\".\n    \n\ninput_typed: Read input registers and decode them as typed values.\n\n    data.values holds `count` values of `dtype`, each multiplied by `scale` and\n    increased by `offset`. NaN and infinities come back as the strings \"NaN\",\n    \"Infinity\" and \"-Infinity\".\n    \n\ntag: Read a named tag from the tag map.\n\n    Tags with a dtype are decoded and scaled like read_holding_typed/read_input_typed;\n    other tags return raw registers or bits.\n    ",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "address": {
+            "description": "Zero-based Modbus address (0-65535).",
+            "maximum": 65535,
+            "minimum": 0,
+            "title": "Address",
+            "type": "integer"
+          },
+          "count": {
+            "anyOf": [
+              {
+                "description": "Number of registers to read (at least 1).",
+                "maximum": 65536,
+                "minimum": 1,
+                "title": "Count",
+                "type": "integer"
+              },
+              {
+                "description": "Number of bits to read (at least 1).",
+                "maximum": 65536,
+                "minimum": 1,
+                "title": "Count",
+                "type": "integer"
+              },
+              {
+                "default": 1,
+                "description": "Number of typed values to decode (at least 1).",
+                "maximum": 65536,
+                "minimum": 1,
+                "title": "Count",
+                "type": "integer"
+              }
+            ],
+            "description": "Number of registers to read (at least 1). Number of bits to read (at least 1). Number of typed values to decode (at least 1)."
+          },
+          "slave_id": {
+            "anyOf": [
+              {
+                "maximum": 255,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Modbus unit/slave ID (0-255); omit to use MODBUS_DEFAULT_SLAVE_ID.",
+            "title": "Slave Id"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "const": "holding",
+                "type": "string"
+              },
+              {
+                "const": "input",
+                "type": "string"
+              },
+              {
+                "const": "coils",
+                "type": "string"
+              },
+              {
+                "const": "discrete",
+                "type": "string"
+              },
+              {
+                "const": "holding_typed",
+                "type": "string"
+              },
+              {
+                "const": "input_typed",
+                "type": "string"
+              },
+              {
+                "const": "tag",
+                "type": "string"
+              }
+            ],
+            "description": "Select the source mode described above."
+          },
+          "dtype": {
+            "description": "Value type; 16-bit types use 1 register, 32-bit 2, 64-bit 4.",
+            "enum": [
+              "int16",
+              "uint16",
+              "int32",
+              "uint32",
+              "int64",
+              "uint64",
+              "float32",
+              "float64"
+            ],
+            "title": "Dtype",
+            "type": "string"
+          },
+          "byteorder": {
+            "default": "big",
+            "description": "Byte order inside each register ('big' is the Modbus default).",
+            "enum": [
+              "big",
+              "little"
+            ],
+            "title": "Byteorder",
+            "type": "string"
+          },
+          "wordorder": {
+            "default": "big",
+            "description": "Register order for values wider than 16 bits ('big' = high word first).",
+            "enum": [
+              "big",
+              "little"
+            ],
+            "title": "Wordorder",
+            "type": "string"
+          },
+          "scale": {
+            "default": 1.0,
+            "description": "Multiply each decoded value by this.",
+            "title": "Scale",
+            "type": "number"
+          },
+          "offset": {
+            "default": 0.0,
+            "description": "Then add this to each decoded value.",
+            "title": "Offset",
+            "type": "number"
+          },
+          "name": {
+            "description": "Tag name from list_tags.",
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source"
+        ],
+        "oneOf": [
+          {
+            "properties": {
+              "address": {
+                "description": "Zero-based Modbus address (0-65535).",
+                "maximum": 65535,
+                "minimum": 0,
+                "title": "Address",
+                "type": "integer"
+              },
+              "count": {
+                "description": "Number of registers to read (at least 1).",
+                "maximum": 65536,
+                "minimum": 1,
+                "title": "Count",
+                "type": "integer"
+              },
+              "slave_id": {
+                "anyOf": [
+                  {
+                    "maximum": 255,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Modbus unit/slave ID (0-255); omit to use MODBUS_DEFAULT_SLAVE_ID.",
+                "title": "Slave Id"
+              },
+              "source": {
+                "const": "holding",
+                "type": "string"
+              }
+            },
+            "required": [
+              "address",
+              "count",
+              "source"
+            ],
+            "type": "object",
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "address": {
+                "description": "Zero-based Modbus address (0-65535).",
+                "maximum": 65535,
+                "minimum": 0,
+                "title": "Address",
+                "type": "integer"
+              },
+              "count": {
+                "description": "Number of registers to read (at least 1).",
+                "maximum": 65536,
+                "minimum": 1,
+                "title": "Count",
+                "type": "integer"
+              },
+              "slave_id": {
+                "anyOf": [
+                  {
+                    "maximum": 255,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Modbus unit/slave ID (0-255); omit to use MODBUS_DEFAULT_SLAVE_ID.",
+                "title": "Slave Id"
+              },
+              "source": {
+                "const": "input",
+                "type": "string"
+              }
+            },
+            "required": [
+              "address",
+              "count",
+              "source"
+            ],
+            "type": "object",
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "address": {
+                "description": "Zero-based Modbus address (0-65535).",
+                "maximum": 65535,
+                "minimum": 0,
+                "title": "Address",
+                "type": "integer"
+              },
+              "count": {
+                "description": "Number of bits to read (at least 1).",
+                "maximum": 65536,
+                "minimum": 1,
+                "title": "Count",
+                "type": "integer"
+              },
+              "slave_id": {
+                "anyOf": [
+                  {
+                    "maximum": 255,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Modbus unit/slave ID (0-255); omit to use MODBUS_DEFAULT_SLAVE_ID.",
+                "title": "Slave Id"
+              },
+              "source": {
+                "const": "coils",
+                "type": "string"
+              }
+            },
+            "required": [
+              "address",
+              "count",
+              "source"
+            ],
+            "type": "object",
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "address": {
+                "description": "Zero-based Modbus address (0-65535).",
+                "maximum": 65535,
+                "minimum": 0,
+                "title": "Address",
+                "type": "integer"
+              },
+              "count": {
+                "description": "Number of bits to read (at least 1).",
+                "maximum": 65536,
+                "minimum": 1,
+                "title": "Count",
+                "type": "integer"
+              },
+              "slave_id": {
+                "anyOf": [
+                  {
+                    "maximum": 255,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Modbus unit/slave ID (0-255); omit to use MODBUS_DEFAULT_SLAVE_ID.",
+                "title": "Slave Id"
+              },
+              "source": {
+                "const": "discrete",
+                "type": "string"
+              }
+            },
+            "required": [
+              "address",
+              "count",
+              "source"
+            ],
+            "type": "object",
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "address": {
+                "description": "Zero-based Modbus address (0-65535).",
+                "maximum": 65535,
+                "minimum": 0,
+                "title": "Address",
+                "type": "integer"
+              },
+              "dtype": {
+                "description": "Value type; 16-bit types use 1 register, 32-bit 2, 64-bit 4.",
+                "enum": [
+                  "int16",
+                  "uint16",
+                  "int32",
+                  "uint32",
+                  "int64",
+                  "uint64",
+                  "float32",
+                  "float64"
+                ],
+                "title": "Dtype",
+                "type": "string"
+              },
+              "count": {
+                "default": 1,
+                "description": "Number of typed values to decode (at least 1).",
+                "maximum": 65536,
+                "minimum": 1,
+                "title": "Count",
+                "type": "integer"
+              },
+              "byteorder": {
+                "default": "big",
+                "description": "Byte order inside each register ('big' is the Modbus default).",
+                "enum": [
+                  "big",
+                  "little"
+                ],
+                "title": "Byteorder",
+                "type": "string"
+              },
+              "wordorder": {
+                "default": "big",
+                "description": "Register order for values wider than 16 bits ('big' = high word first).",
+                "enum": [
+                  "big",
+                  "little"
+                ],
+                "title": "Wordorder",
+                "type": "string"
+              },
+              "scale": {
+                "default": 1.0,
+                "description": "Multiply each decoded value by this.",
+                "title": "Scale",
+                "type": "number"
+              },
+              "offset": {
+                "default": 0.0,
+                "description": "Then add this to each decoded value.",
+                "title": "Offset",
+                "type": "number"
+              },
+              "slave_id": {
+                "anyOf": [
+                  {
+                    "maximum": 255,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Modbus unit/slave ID (0-255); omit to use MODBUS_DEFAULT_SLAVE_ID.",
+                "title": "Slave Id"
+              },
+              "source": {
+                "const": "holding_typed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "address",
+              "dtype",
+              "source"
+            ],
+            "type": "object",
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "address": {
+                "description": "Zero-based Modbus address (0-65535).",
+                "maximum": 65535,
+                "minimum": 0,
+                "title": "Address",
+                "type": "integer"
+              },
+              "dtype": {
+                "description": "Value type; 16-bit types use 1 register, 32-bit 2, 64-bit 4.",
+                "enum": [
+                  "int16",
+                  "uint16",
+                  "int32",
+                  "uint32",
+                  "int64",
+                  "uint64",
+                  "float32",
+                  "float64"
+                ],
+                "title": "Dtype",
+                "type": "string"
+              },
+              "count": {
+                "default": 1,
+                "description": "Number of typed values to decode (at least 1).",
+                "maximum": 65536,
+                "minimum": 1,
+                "title": "Count",
+                "type": "integer"
+              },
+              "byteorder": {
+                "default": "big",
+                "description": "Byte order inside each register ('big' is the Modbus default).",
+                "enum": [
+                  "big",
+                  "little"
+                ],
+                "title": "Byteorder",
+                "type": "string"
+              },
+              "wordorder": {
+                "default": "big",
+                "description": "Register order for values wider than 16 bits ('big' = high word first).",
+                "enum": [
+                  "big",
+                  "little"
+                ],
+                "title": "Wordorder",
+                "type": "string"
+              },
+              "scale": {
+                "default": 1.0,
+                "description": "Multiply each decoded value by this.",
+                "title": "Scale",
+                "type": "number"
+              },
+              "offset": {
+                "default": 0.0,
+                "description": "Then add this to each decoded value.",
+                "title": "Offset",
+                "type": "number"
+              },
+              "slave_id": {
+                "anyOf": [
+                  {
+                    "maximum": 255,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Modbus unit/slave ID (0-255); omit to use MODBUS_DEFAULT_SLAVE_ID.",
+                "title": "Slave Id"
+              },
+              "source": {
+                "const": "input_typed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "address",
+              "dtype",
+              "source"
+            ],
+            "type": "object",
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "name": {
+                "description": "Tag name from list_tags.",
+                "title": "Name",
+                "type": "string"
+              },
+              "source": {
+                "const": "tag",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "source"
+            ],
+            "type": "object",
+            "additionalProperties": false
+          }
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "success",
+          "data",
+          "error",
+          "meta"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "data": {},
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "meta": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "write_values",
+      "description": "Select one target mode and provide only its parameters.\n\nholding: Write consecutive holding registers in one request (function 16).\n\n    Only works when MODBUS_WRITES_ENABLED=true; otherwise nothing is sent and\n    success is false. The write is sent at most once. meta.outcome says what\n    happened: written (acknowledged), rejected (refused with an exception that\n    means nothing was done), not_sent, or unknown (no reply, a reply that does\n    not match, or an exception that does not rule a write out: it may have been\n    applied, so check before retrying); meta.request_sent says whether the\n    request went out.\n    \n\ncoils: Write consecutive coils in one request (function 15).\n\n    Only works when MODBUS_WRITES_ENABLED=true; otherwise nothing is sent and\n    success is false. The write is sent at most once. meta.outcome says what\n    happened: written (acknowledged), rejected (refused with an exception that\n    means nothing was done), not_sent, or unknown (no reply, a reply that does\n    not match, or an exception that does not rule a write out: it may have been\n    applied, so check before retrying); meta.request_sent says whether the\n    request went out.\n    \n\ntag: Write a named holding-register or coil tag from the tag map.\n\n    Holding-register values are in the same units read_tag returns: the tag's\n    scale and offset are reversed, then the value is encoded with its dtype\n    (default uint16) and byte/word order. Input and discrete-input tags are\n    read-only. Only works when MODBUS_WRITES_ENABLED=true; otherwise nothing is\n    sent and success is false. meta.outcome and meta.request_sent work as in\n    write_register.\n    ",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "address": {
+            "description": "Zero-based Modbus address (0-65535).",
+            "maximum": 65535,
+            "minimum": 0,
+            "title": "Address",
+            "type": "integer"
+          },
+          "values": {
+            "anyOf": [
+              {
+                "description": "1-123 register values (0-65535 each), written from `address` up.",
+                "items": {
+                  "description": "Unsigned 16-bit register value (0-65535).",
+                  "maximum": 65535,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "maxItems": 123,
+                "minItems": 1,
+                "title": "Values",
+                "type": "array"
+              },
+              {
+                "description": "1-1968 coil states, written from `address` up.",
+                "items": {
+                  "type": "boolean"
+                },
+                "maxItems": 1968,
+                "minItems": 1,
+                "title": "Values",
+                "type": "array"
+              }
+            ],
+            "description": "1-123 register values (0-65535 each), written from `address` up. 1-1968 coil states, written from `address` up."
+          },
+          "slave_id": {
+            "anyOf": [
+              {
+                "maximum": 255,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Modbus unit/slave ID (0-255); omit to use MODBUS_DEFAULT_SLAVE_ID.",
+            "title": "Slave Id"
+          },
+          "target": {
+            "anyOf": [
+              {
+                "const": "holding",
+                "type": "string"
+              },
+              {
+                "const": "coils",
+                "type": "string"
+              },
+              {
+                "const": "tag",
+                "type": "string"
+              }
+            ],
+            "description": "Select the target mode described above."
+          },
+          "name": {
+            "description": "Tag name from list_tags.",
+            "title": "Name",
+            "type": "string"
+          },
+          "value": {
+            "description": "Coil tags: true or false. Holding-register tags: a number, or a list of `count` numbers for a tag with count > 1.",
+            "title": "Value"
+          }
+        },
+        "required": [
+          "target"
+        ],
+        "oneOf": [
+          {
+            "properties": {
+              "address": {
+                "description": "Zero-based Modbus address (0-65535).",
+                "maximum": 65535,
+                "minimum": 0,
+                "title": "Address",
+                "type": "integer"
+              },
+              "values": {
+                "description": "1-123 register values (0-65535 each), written from `address` up.",
+                "items": {
+                  "description": "Unsigned 16-bit register value (0-65535).",
+                  "maximum": 65535,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "maxItems": 123,
+                "minItems": 1,
+                "title": "Values",
+                "type": "array"
+              },
+              "slave_id": {
+                "anyOf": [
+                  {
+                    "maximum": 255,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Modbus unit/slave ID (0-255); omit to use MODBUS_DEFAULT_SLAVE_ID.",
+                "title": "Slave Id"
+              },
+              "target": {
+                "const": "holding",
+                "type": "string"
+              }
+            },
+            "required": [
+              "address",
+              "values",
+              "target"
+            ],
+            "type": "object",
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "address": {
+                "description": "Zero-based Modbus address (0-65535).",
+                "maximum": 65535,
+                "minimum": 0,
+                "title": "Address",
+                "type": "integer"
+              },
+              "values": {
+                "description": "1-1968 coil states, written from `address` up.",
+                "items": {
+                  "type": "boolean"
+                },
+                "maxItems": 1968,
+                "minItems": 1,
+                "title": "Values",
+                "type": "array"
+              },
+              "slave_id": {
+                "anyOf": [
+                  {
+                    "maximum": 255,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Modbus unit/slave ID (0-255); omit to use MODBUS_DEFAULT_SLAVE_ID.",
+                "title": "Slave Id"
+              },
+              "target": {
+                "const": "coils",
+                "type": "string"
+              }
+            },
+            "required": [
+              "address",
+              "values",
+              "target"
+            ],
+            "type": "object",
+            "additionalProperties": false
+          },
+          {
+            "properties": {
+              "name": {
+                "description": "Tag name from list_tags.",
+                "title": "Name",
+                "type": "string"
+              },
+              "value": {
+                "description": "Coil tags: true or false. Holding-register tags: a number, or a list of `count` numbers for a tag with count > 1.",
+                "title": "Value"
+              },
+              "target": {
+                "const": "tag",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "value",
+              "target"
+            ],
+            "type": "object",
+            "additionalProperties": false
+          }
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "success",
+          "data",
+          "error",
+          "meta"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "data": {},
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "meta": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "mask_write_register",
+      "description": "Change bits of one holding register in place (function 22).\n\n    The device sets: register = (register AND and_mask) OR (or_mask AND NOT and_mask).\n    Only works when MODBUS_WRITES_ENABLED=true; otherwise nothing is sent and\n    success is false. The write is sent at most once. meta.outcome says what\n    happened: written (acknowledged), rejected (refused with an exception that\n    means nothing was done), not_sent, or unknown (no reply, a reply that does\n    not match, or an exception that does not rule a write out: it may have been\n    applied, so check before retrying); meta.request_sent says whether the\n    request went out.\n    ",
+      "inputSchema": {
+        "properties": {
+          "address": {
+            "description": "Zero-based Modbus address (0-65535).",
+            "maximum": 65535,
+            "minimum": 0,
+            "title": "Address",
+            "type": "integer"
+          },
+          "and_mask": {
+            "description": "16-bit mask (0-65535).",
+            "maximum": 65535,
+            "minimum": 0,
+            "title": "And Mask",
+            "type": "integer"
+          },
+          "or_mask": {
+            "description": "16-bit mask (0-65535).",
+            "maximum": 65535,
+            "minimum": 0,
+            "title": "Or Mask",
+            "type": "integer"
+          },
+          "slave_id": {
+            "anyOf": [
+              {
+                "maximum": 255,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Modbus unit/slave ID (0-255); omit to use MODBUS_DEFAULT_SLAVE_ID.",
+            "title": "Slave Id"
+          }
+        },
+        "required": [
+          "address",
+          "and_mask",
+          "or_mask"
+        ],
+        "title": "mask_write_registerArguments",
+        "type": "object",
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "success",
+          "data",
+          "error",
+          "meta"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "data": {},
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "meta": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false
+      }
+    },
+    {
+      "name": "read_device_information",
+      "description": "Read the device identification objects (function 43 / MEI type 14).\n\n    data maps object ids to text: 0 VendorName, 1 ProductCode, 2 MajorMinorRevision,\n    3 VendorUrl, 4 ProductName, 5 ModelName, 6 UserApplicationName.\n    ",
+      "inputSchema": {
+        "properties": {
+          "slave_id": {
+            "anyOf": [
+              {
+                "maximum": 255,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Modbus unit/slave ID (0-255); omit to use MODBUS_DEFAULT_SLAVE_ID.",
+            "title": "Slave Id"
+          },
+          "read_code": {
+            "default": 3,
+            "description": "1 = basic, 2 = regular, 3 = extended, 4 = one object.",
+            "maximum": 4,
+            "minimum": 1,
+            "title": "Read Code",
+            "type": "integer"
+          },
+          "object_id": {
+            "default": 0,
+            "description": "First object to read (0 = VendorName).",
+            "maximum": 255,
+            "minimum": 0,
+            "title": "Object Id",
+            "type": "integer"
+          }
+        },
+        "title": "read_device_informationArguments",
+        "type": "object",
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "success",
+          "data",
+          "error",
+          "meta"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "data": {},
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "meta": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true
+      }
+    },
+    {
+      "name": "list_tags",
+      "description": "List the named tags defined in the tag map (REGISTER_MAP_FILE), with their definitions.",
+      "inputSchema": {
+        "properties": {},
+        "title": "list_tagsArguments",
+        "type": "object",
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "success",
+          "data",
+          "error",
+          "meta"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "data": {},
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "meta": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true
+      }
+    },
+    {
+      "name": "ping",
+      "description": "Check that the device answers, and report the server's configuration.\n\n    Reads one holding register (address 0 unless given) as a probe. Any Modbus\n    reply counts as reachable, including an exception reply such as Illegal Data\n    Address from a device without that register; no reply (timeout, connection\n    refused) does not, and then success is false. Connects first if the server\n    is not connected (the device was unreachable at startup, or the connection\n    dropped); if that fails, the error is \"cannot reach device at ...\".\n    ",
+      "inputSchema": {
+        "properties": {
+          "slave_id": {
+            "anyOf": [
+              {
+                "maximum": 255,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Modbus unit/slave ID (0-255); omit to use MODBUS_DEFAULT_SLAVE_ID.",
+            "title": "Slave Id"
+          },
+          "address": {
+            "default": 0,
+            "description": "Holding register to probe (default 0).",
+            "maximum": 65535,
+            "minimum": 0,
+            "title": "Address",
+            "type": "integer"
+          }
+        },
+        "title": "pingArguments",
+        "type": "object",
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "success",
+          "data",
+          "error",
+          "meta"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "data": {},
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "meta": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true
+      }
+    }
+  ],
+  "routes": {
+    "read_values": {
+      "selector": "source",
+      "options": {
+        "holding": "read_multiple_holding_registers",
+        "input": "read_input_registers",
+        "coils": "read_coils",
+        "discrete": "read_discrete_inputs",
+        "holding_typed": "read_holding_typed",
+        "input_typed": "read_input_typed",
+        "tag": "read_tag"
+      }
+    },
+    "write_values": {
+      "selector": "target",
+      "options": {
+        "holding": "write_registers",
+        "coils": "write_coils_bulk",
+        "tag": "write_tag"
+      }
+    },
+    "mask_write_register": {
+      "handler": "mask_write_register"
+    },
+    "read_device_information": {
+      "handler": "read_device_information"
+    },
+    "list_tags": {
+      "handler": "list_tags"
+    },
+    "ping": {
+      "handler": "ping"
+    }
+  },
+  "legacy": {
+    "read_multiple_holding_registers": "read_values",
+    "read_input_registers": "read_values",
+    "read_coils": "read_values",
+    "read_discrete_inputs": "read_values",
+    "read_holding_typed": "read_values",
+    "read_input_typed": "read_values",
+    "read_tag": "read_values",
+    "write_registers": "write_values",
+    "write_coils_bulk": "write_values",
+    "write_tag": "write_values",
+    "read_register": "read_values",
+    "write_register": "write_values",
+    "write_coil": "write_values",
+    "mask_write_register": "mask_write_register",
+    "read_device_information": "read_device_information",
+    "list_tags": "list_tags",
+    "ping": "ping"
+  },
+  "legacySchemas": {
+    "read_register": {
+      "properties": {
+        "address": {
+          "description": "Zero-based Modbus address (0-65535).",
+          "maximum": 65535,
+          "minimum": 0,
+          "title": "Address",
+          "type": "integer"
+        },
+        "slave_id": {
+          "anyOf": [
+            {
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Modbus unit/slave ID (0-255); omit to use MODBUS_DEFAULT_SLAVE_ID.",
+          "title": "Slave Id"
+        }
+      },
+      "required": [
+        "address"
+      ],
+      "title": "read_registerArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "write_register": {
+      "properties": {
+        "address": {
+          "description": "Zero-based Modbus address (0-65535).",
+          "maximum": 65535,
+          "minimum": 0,
+          "title": "Address",
+          "type": "integer"
+        },
+        "value": {
+          "description": "Unsigned 16-bit register value (0-65535).",
+          "maximum": 65535,
+          "minimum": 0,
+          "title": "Value",
+          "type": "integer"
+        },
+        "slave_id": {
+          "anyOf": [
+            {
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Modbus unit/slave ID (0-255); omit to use MODBUS_DEFAULT_SLAVE_ID.",
+          "title": "Slave Id"
+        }
+      },
+      "required": [
+        "address",
+        "value"
+      ],
+      "title": "write_registerArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "read_coils": {
+      "properties": {
+        "address": {
+          "description": "Zero-based Modbus address (0-65535).",
+          "maximum": 65535,
+          "minimum": 0,
+          "title": "Address",
+          "type": "integer"
+        },
+        "count": {
+          "description": "Number of bits to read (at least 1).",
+          "maximum": 65536,
+          "minimum": 1,
+          "title": "Count",
+          "type": "integer"
+        },
+        "slave_id": {
+          "anyOf": [
+            {
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Modbus unit/slave ID (0-255); omit to use MODBUS_DEFAULT_SLAVE_ID.",
+          "title": "Slave Id"
+        }
+      },
+      "required": [
+        "address",
+        "count"
+      ],
+      "title": "read_coilsArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "write_coil": {
+      "properties": {
+        "address": {
+          "description": "Zero-based Modbus address (0-65535).",
+          "maximum": 65535,
+          "minimum": 0,
+          "title": "Address",
+          "type": "integer"
+        },
+        "value": {
+          "description": "true = ON, false = OFF.",
+          "title": "Value",
+          "type": "boolean"
+        },
+        "slave_id": {
+          "anyOf": [
+            {
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Modbus unit/slave ID (0-255); omit to use MODBUS_DEFAULT_SLAVE_ID.",
+          "title": "Slave Id"
+        }
+      },
+      "required": [
+        "address",
+        "value"
+      ],
+      "title": "write_coilArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "read_input_registers": {
+      "properties": {
+        "address": {
+          "description": "Zero-based Modbus address (0-65535).",
+          "maximum": 65535,
+          "minimum": 0,
+          "title": "Address",
+          "type": "integer"
+        },
+        "count": {
+          "description": "Number of registers to read (at least 1).",
+          "maximum": 65536,
+          "minimum": 1,
+          "title": "Count",
+          "type": "integer"
+        },
+        "slave_id": {
+          "anyOf": [
+            {
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Modbus unit/slave ID (0-255); omit to use MODBUS_DEFAULT_SLAVE_ID.",
+          "title": "Slave Id"
+        }
+      },
+      "required": [
+        "address",
+        "count"
+      ],
+      "title": "read_input_registersArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "read_multiple_holding_registers": {
+      "properties": {
+        "address": {
+          "description": "Zero-based Modbus address (0-65535).",
+          "maximum": 65535,
+          "minimum": 0,
+          "title": "Address",
+          "type": "integer"
+        },
+        "count": {
+          "description": "Number of registers to read (at least 1).",
+          "maximum": 65536,
+          "minimum": 1,
+          "title": "Count",
+          "type": "integer"
+        },
+        "slave_id": {
+          "anyOf": [
+            {
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Modbus unit/slave ID (0-255); omit to use MODBUS_DEFAULT_SLAVE_ID.",
+          "title": "Slave Id"
+        }
+      },
+      "required": [
+        "address",
+        "count"
+      ],
+      "title": "read_multiple_holding_registersArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "read_discrete_inputs": {
+      "properties": {
+        "address": {
+          "description": "Zero-based Modbus address (0-65535).",
+          "maximum": 65535,
+          "minimum": 0,
+          "title": "Address",
+          "type": "integer"
+        },
+        "count": {
+          "description": "Number of bits to read (at least 1).",
+          "maximum": 65536,
+          "minimum": 1,
+          "title": "Count",
+          "type": "integer"
+        },
+        "slave_id": {
+          "anyOf": [
+            {
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Modbus unit/slave ID (0-255); omit to use MODBUS_DEFAULT_SLAVE_ID.",
+          "title": "Slave Id"
+        }
+      },
+      "required": [
+        "address",
+        "count"
+      ],
+      "title": "read_discrete_inputsArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "write_registers": {
+      "properties": {
+        "address": {
+          "description": "Zero-based Modbus address (0-65535).",
+          "maximum": 65535,
+          "minimum": 0,
+          "title": "Address",
+          "type": "integer"
+        },
+        "values": {
+          "description": "1-123 register values (0-65535 each), written from `address` up.",
+          "items": {
+            "description": "Unsigned 16-bit register value (0-65535).",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxItems": 123,
+          "minItems": 1,
+          "title": "Values",
+          "type": "array"
+        },
+        "slave_id": {
+          "anyOf": [
+            {
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Modbus unit/slave ID (0-255); omit to use MODBUS_DEFAULT_SLAVE_ID.",
+          "title": "Slave Id"
+        }
+      },
+      "required": [
+        "address",
+        "values"
+      ],
+      "title": "write_registersArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "write_coils_bulk": {
+      "properties": {
+        "address": {
+          "description": "Zero-based Modbus address (0-65535).",
+          "maximum": 65535,
+          "minimum": 0,
+          "title": "Address",
+          "type": "integer"
+        },
+        "values": {
+          "description": "1-1968 coil states, written from `address` up.",
+          "items": {
+            "type": "boolean"
+          },
+          "maxItems": 1968,
+          "minItems": 1,
+          "title": "Values",
+          "type": "array"
+        },
+        "slave_id": {
+          "anyOf": [
+            {
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Modbus unit/slave ID (0-255); omit to use MODBUS_DEFAULT_SLAVE_ID.",
+          "title": "Slave Id"
+        }
+      },
+      "required": [
+        "address",
+        "values"
+      ],
+      "title": "write_coils_bulkArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "mask_write_register": {
+      "properties": {
+        "address": {
+          "description": "Zero-based Modbus address (0-65535).",
+          "maximum": 65535,
+          "minimum": 0,
+          "title": "Address",
+          "type": "integer"
+        },
+        "and_mask": {
+          "description": "16-bit mask (0-65535).",
+          "maximum": 65535,
+          "minimum": 0,
+          "title": "And Mask",
+          "type": "integer"
+        },
+        "or_mask": {
+          "description": "16-bit mask (0-65535).",
+          "maximum": 65535,
+          "minimum": 0,
+          "title": "Or Mask",
+          "type": "integer"
+        },
+        "slave_id": {
+          "anyOf": [
+            {
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Modbus unit/slave ID (0-255); omit to use MODBUS_DEFAULT_SLAVE_ID.",
+          "title": "Slave Id"
+        }
+      },
+      "required": [
+        "address",
+        "and_mask",
+        "or_mask"
+      ],
+      "title": "mask_write_registerArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "read_device_information": {
+      "properties": {
+        "slave_id": {
+          "anyOf": [
+            {
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Modbus unit/slave ID (0-255); omit to use MODBUS_DEFAULT_SLAVE_ID.",
+          "title": "Slave Id"
+        },
+        "read_code": {
+          "default": 3,
+          "description": "1 = basic, 2 = regular, 3 = extended, 4 = one object.",
+          "maximum": 4,
+          "minimum": 1,
+          "title": "Read Code",
+          "type": "integer"
+        },
+        "object_id": {
+          "default": 0,
+          "description": "First object to read (0 = VendorName).",
+          "maximum": 255,
+          "minimum": 0,
+          "title": "Object Id",
+          "type": "integer"
+        }
+      },
+      "title": "read_device_informationArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "read_holding_typed": {
+      "properties": {
+        "address": {
+          "description": "Zero-based Modbus address (0-65535).",
+          "maximum": 65535,
+          "minimum": 0,
+          "title": "Address",
+          "type": "integer"
+        },
+        "dtype": {
+          "description": "Value type; 16-bit types use 1 register, 32-bit 2, 64-bit 4.",
+          "enum": [
+            "int16",
+            "uint16",
+            "int32",
+            "uint32",
+            "int64",
+            "uint64",
+            "float32",
+            "float64"
+          ],
+          "title": "Dtype",
+          "type": "string"
+        },
+        "count": {
+          "default": 1,
+          "description": "Number of typed values to decode (at least 1).",
+          "maximum": 65536,
+          "minimum": 1,
+          "title": "Count",
+          "type": "integer"
+        },
+        "byteorder": {
+          "default": "big",
+          "description": "Byte order inside each register ('big' is the Modbus default).",
+          "enum": [
+            "big",
+            "little"
+          ],
+          "title": "Byteorder",
+          "type": "string"
+        },
+        "wordorder": {
+          "default": "big",
+          "description": "Register order for values wider than 16 bits ('big' = high word first).",
+          "enum": [
+            "big",
+            "little"
+          ],
+          "title": "Wordorder",
+          "type": "string"
+        },
+        "scale": {
+          "default": 1.0,
+          "description": "Multiply each decoded value by this.",
+          "title": "Scale",
+          "type": "number"
+        },
+        "offset": {
+          "default": 0.0,
+          "description": "Then add this to each decoded value.",
+          "title": "Offset",
+          "type": "number"
+        },
+        "slave_id": {
+          "anyOf": [
+            {
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Modbus unit/slave ID (0-255); omit to use MODBUS_DEFAULT_SLAVE_ID.",
+          "title": "Slave Id"
+        }
+      },
+      "required": [
+        "address",
+        "dtype"
+      ],
+      "title": "read_holding_typedArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "read_input_typed": {
+      "properties": {
+        "address": {
+          "description": "Zero-based Modbus address (0-65535).",
+          "maximum": 65535,
+          "minimum": 0,
+          "title": "Address",
+          "type": "integer"
+        },
+        "dtype": {
+          "description": "Value type; 16-bit types use 1 register, 32-bit 2, 64-bit 4.",
+          "enum": [
+            "int16",
+            "uint16",
+            "int32",
+            "uint32",
+            "int64",
+            "uint64",
+            "float32",
+            "float64"
+          ],
+          "title": "Dtype",
+          "type": "string"
+        },
+        "count": {
+          "default": 1,
+          "description": "Number of typed values to decode (at least 1).",
+          "maximum": 65536,
+          "minimum": 1,
+          "title": "Count",
+          "type": "integer"
+        },
+        "byteorder": {
+          "default": "big",
+          "description": "Byte order inside each register ('big' is the Modbus default).",
+          "enum": [
+            "big",
+            "little"
+          ],
+          "title": "Byteorder",
+          "type": "string"
+        },
+        "wordorder": {
+          "default": "big",
+          "description": "Register order for values wider than 16 bits ('big' = high word first).",
+          "enum": [
+            "big",
+            "little"
+          ],
+          "title": "Wordorder",
+          "type": "string"
+        },
+        "scale": {
+          "default": 1.0,
+          "description": "Multiply each decoded value by this.",
+          "title": "Scale",
+          "type": "number"
+        },
+        "offset": {
+          "default": 0.0,
+          "description": "Then add this to each decoded value.",
+          "title": "Offset",
+          "type": "number"
+        },
+        "slave_id": {
+          "anyOf": [
+            {
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Modbus unit/slave ID (0-255); omit to use MODBUS_DEFAULT_SLAVE_ID.",
+          "title": "Slave Id"
+        }
+      },
+      "required": [
+        "address",
+        "dtype"
+      ],
+      "title": "read_input_typedArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "list_tags": {
+      "properties": {},
+      "title": "list_tagsArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "read_tag": {
+      "properties": {
+        "name": {
+          "description": "Tag name from list_tags.",
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "read_tagArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "write_tag": {
+      "properties": {
+        "name": {
+          "description": "Tag name from list_tags.",
+          "title": "Name",
+          "type": "string"
+        },
+        "value": {
+          "description": "Coil tags: true or false. Holding-register tags: a number, or a list of `count` numbers for a tag with count > 1.",
+          "title": "Value"
+        }
+      },
+      "required": [
+        "name",
+        "value"
+      ],
+      "title": "write_tagArguments",
+      "type": "object",
+      "additionalProperties": false
+    },
+    "ping": {
+      "properties": {
+        "slave_id": {
+          "anyOf": [
+            {
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Modbus unit/slave ID (0-255); omit to use MODBUS_DEFAULT_SLAVE_ID.",
+          "title": "Slave Id"
+        },
+        "address": {
+          "default": 0,
+          "description": "Holding register to probe (default 0).",
+          "maximum": 65535,
+          "minimum": 0,
+          "title": "Address",
+          "type": "integer"
+        }
+      },
+      "title": "pingArguments",
+      "type": "object",
+      "additionalProperties": false
+    }
+  },
+  "resultSchema": {
+    "type": "object",
+    "required": [
+      "success",
+      "data",
+      "error",
+      "meta"
+    ],
+    "properties": {
+      "success": {
+        "type": "boolean"
+      },
+      "data": {},
+      "error": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "meta": {
+        "type": "object"
+      }
+    },
+    "additionalProperties": false
+  },
+  "localStatusTools": [
+    "list_tags"
+  ]
+}

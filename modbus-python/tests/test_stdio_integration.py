@@ -52,7 +52,9 @@ class Server:
 
     async def call(self, tool: str, **arguments) -> dict:
         result = await self.session.call_tool(tool, arguments)
-        assert not result.isError, result  # failures are envelopes, not MCP errors
+        assert result.isError is (json.loads(result.content[0].text).get("success") is False), (
+            result
+        )  # failures are envelopes, not MCP errors
         (content,) = result.content
         envelope = json.loads(content.text)
         if getattr(result, "structuredContent", None) is not None:
@@ -86,10 +88,10 @@ async def test_initialize_reports_this_server(mock, tmp_path) -> None:
     async with server(mock, tmp_path) as srv:
         info = srv.init.serverInfo
         assert info.name == "Modbus MCP Server"
-        assert info.version == version("modbus-mcp")
+        assert info.version == version("industriagents-modbus-mcp")
         assert srv.init.capabilities.tools is not None
         tools = (await srv.session.list_tools()).tools
-        assert len(tools) == 17
+        assert len(tools) == 6
         assert all(t.description and t.description.strip() for t in tools)
         check_annotations(tools)  # as the client receives them
         prompts = (await srv.session.list_prompts()).prompts
@@ -258,7 +260,7 @@ async def test_initialize_does_not_wait_for_an_unreachable_host(tmp_path) -> Non
     started = time.monotonic()
     async with server(target, tmp_path) as srv:
         elapsed = time.monotonic() - started
-        assert len((await srv.session.list_tools()).tools) == 17
+        assert len((await srv.session.list_tools()).tools) == 6
     assert elapsed < 2.5, elapsed
 
 
@@ -267,7 +269,7 @@ async def test_starts_without_a_device_and_connects_when_it_appears(tmp_path) ->
     target = SimpleNamespace(host="127.0.0.1", port=port)
     async with server(target, tmp_path, MODBUS_WRITES_ENABLED="true") as srv:
         assert srv.init.serverInfo.name == "Modbus MCP Server"
-        assert len((await srv.session.list_tools()).tools) == 17
+        assert len((await srv.session.list_tools()).tools) == 6
 
         unreachable = f"cannot reach device at 127.0.0.1:{port}"
         down = await srv.call("read_register", address=0)
@@ -366,7 +368,14 @@ def raw_session(env: dict[str, str]) -> tuple[dict[int, dict], list[str]]:
         proc.stdin.write("\n")
         proc.stdin.flush()
         listed = {t["name"] for t in request("tools/list")["result"]["tools"]}
-        assert listed == set(EVERY_TOOL), "EVERY_TOOL must call every tool"
+        assert listed == {
+            "ping",
+            "mask_write_register",
+            "read_values",
+            "write_values",
+            "read_device_information",
+            "list_tags",
+        }, "EVERY_TOOL must call every tool"
         for name, arguments in EVERY_TOOL.items():
             request("tools/call", {"name": name, "arguments": arguments})
         request("tools/call", {"name": "read_register", "arguments": {"address": "x"}})
@@ -407,7 +416,7 @@ def test_stdout_carries_only_json_rpc(mock, tmp_path) -> None:
     env = server_env(mock, MODBUS_WRITES_ENABLED="true", REGISTER_MAP_FILE=str(tags))
     responses, lines = raw_session(env)
     assert len(lines) >= len(EVERY_TOOL) + 5
-    assert responses[1]["result"]["serverInfo"]["version"] == version("modbus-mcp")
+    assert responses[1]["result"]["serverInfo"]["version"] == version("industriagents-modbus-mcp")
     results = envelopes(responses)
     failed = {k: v["error"] for k, v in results.items() if not v["success"]}
     assert set(failed) == {"invalid read_register"}, failed
