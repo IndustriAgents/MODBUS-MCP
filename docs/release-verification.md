@@ -33,8 +33,8 @@ Rebuilding can change archive hashes; these identify the verified files.
 
 | Artifact | SHA-256 |
 |---|---|
-| `industriagents_modbus_mcp-0.3.0-py3-none-any.whl` | `3ca9005e07bbed197400274fbed7d3bd7abc8e4ac92db938e46705facf678f77` |
-| `industriagents_modbus_mcp-0.3.0.tar.gz` | `0611f150a372b25b1f4c80da3502f2f01744fac666ce531c3c8bd56ca5ab1d87` |
-| `industriagents-modbus-mcp-0.3.0.tgz` | `59a9ea78ecb0bca1b57cce9e609142ba9dc99fd9f62d8ad8aa7af9f3dd4631b2` |
+| `industriagents_modbus_mcp-0.3.0-py3-none-any.whl` | `e9f5073bf480bfe7db7d3d43e752bba45842d2096a49e5e2742b9f73a03ab8ff` |
+| `industriagents_modbus_mcp-0.3.0.tar.gz` | `8516defd94d47b1c369179f670f5a5017bc77e7c15491920e7f16cd8a8d83416` |
+| `industriagents-modbus-mcp-0.3.0.tgz` | `25a352758833b4a43b9a165fb4f7a7639206cd1f566d833a2a81f471ca2675a3` |
 
 See [release instructions](release.md) for independent registry publication.

@@ -71,8 +71,8 @@ connect, so the mock can come up before or after the server.
 
 Both projects commit `uv.lock`, and `uv sync` installs exactly what it pins.
 The ranges in the two `pyproject.toml` files are the versions the tests pass
-on: the server takes `mcp>=1.12.3,<2`, `pymodbus[serial]>=3.9.2,<3.16` and
-`python-dotenv>=1.1.0`, `anyio>=4.5` and `pydantic>=2.8.0,<3`, the mock `pymodbus>=3.11.1,<3.13` (see their READMEs
+on: the server takes `mcp>=1.22.0,<2`, `pymodbus[serial]>=3.9.2,<3.16` and
+`python-dotenv>=1.1.0`, `anyio>=4.5` and `pydantic>=2.8.0,<2.13`, the mock `pymodbus>=3.11.1,<3.13` (see their READMEs
 for why). CI runs the server's tests on the locked versions and again with
 `uv pip install --resolution lowest-direct`, i.e. the lowest version of every
 direct dependency, and starts the mock on its lowest pymodbus. If you change a

@@ -55,10 +55,10 @@ Each of `modbus-python/` and `modbus-mock-server/` is its own uv project with a 
 
 | Project | Locked | Supported range (in `pyproject.toml`) |
 |---------|--------|----------------------------------------|
-| `modbus-python` | `mcp` 1.30.0, `pymodbus` 3.15.0, `python-dotenv` 1.2.4, `pyserial` 3.5, `anyio` 4.15.1, `pydantic` 2.13.5 | `mcp>=1.12.3,<2`, `pymodbus[serial]>=3.9.2,<3.16`, `python-dotenv>=1.1.0`, `anyio>=4.5`, `pydantic>=2.8.0,<3` |
+| `modbus-python` | `mcp` 1.30.0, `pymodbus` 3.15.0, `python-dotenv` 1.2.4, `pyserial` 3.5, `anyio` 4.15.1, `pydantic` 2.12.5 | `mcp>=1.22.0,<2`, `pymodbus[serial]>=3.9.2,<3.16`, `python-dotenv>=1.1.0`, `anyio>=4.5`, `pydantic>=2.8.0,<2.13` |
 | `modbus-mock-server` | `pymodbus` 3.12.1 | `pymodbus>=3.11.1,<3.13` |
 
-The ranges are what the test suite passes on: the server's full suite (unit tests plus the stdio and mock integration tests) passed with the latest patch release of every pymodbus minor from 3.9 to 3.15 (3.9.2, 3.10.0, 3.11.4, 3.12.1, 3.13.1, 3.14.0, 3.15.0) and with mcp 1.12.3, 1.16.0, 1.20.0, 1.25.0 and 1.30.0. CI runs it on the lockfile and on the lowest version of every direct dependency (`uv pip install --resolution lowest-direct` with anyio pinned to its floor: mcp 1.12.3, pymodbus 3.9.2, python-dotenv 1.1.0, pyserial 3.5, anyio 4.5.0, pydantic 2.8.0). Up to mcp 1.12.2, a client cancelling a call (`notifications/cancelled`) left the server unable to answer any later request, so 1.12.3 is the floor; `mcp` 2.x removed the `mcp.server.fastmcp` module this server is built on. The mock's limits are explained in its [Known issues](modbus-mock-server/README.md#known-issues).
+CI runs the server's full unit, stdio and mock integration suite on the lockfile and on the lowest resolvable direct dependencies. Version 0.3.0 requires MCP 1.22 or later for direct `CallToolResult` error responses and targets MCP 1.x. Pydantic is capped below 2.13 because the supported MCP floor depends on typing helpers removed there. The mock's limits are explained in its [Known issues](modbus-mock-server/README.md#known-issues).
 
 ## Quick Start (Local)
 

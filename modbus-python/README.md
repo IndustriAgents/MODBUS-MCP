@@ -60,7 +60,7 @@ The MCP server of [MODBUS-MCP](../README.md). It is a [uv](https://docs.astral.s
    ```bash
    uv sync
    ```
-   This installs the versions pinned in the committed `uv.lock` (`mcp` 1.30.0, `pymodbus` 3.15.0 with `pyserial` 3.5 for serial ports) plus the dev tools (pytest, ruff). The supported ranges in `pyproject.toml` are `mcp>=1.12.3,<2`, `pymodbus[serial]>=3.9.2,<3.16` and `python-dotenv>=1.1.0`: the full test suite passed with the latest patch release of every pymodbus minor from 3.9 to 3.15 and with mcp 1.12.3, 1.16.0, 1.20.0, 1.25.0 and 1.30.0, and CI runs it on every change with the lowest version of every direct dependency (mcp 1.12.3, pymodbus 3.9.2, python-dotenv 1.1.0, pyserial 3.5). Up to mcp 1.12.2, a client cancelling a call (`notifications/cancelled`) left FastMCP unable to answer any later request (checked with a stock FastMCP server), so 1.12.3 is the floor. pymodbus 3.10 renamed the unit-id keyword from `slave` to `device_id`; the server uses whichever the installed version takes. mcp 2.x removed `mcp.server.fastmcp` and is not supported.
+   This installs the versions pinned in `uv.lock`, plus pytest and Ruff. The server supports `mcp>=1.22.0,<2`, `pymodbus[serial]>=3.9.2,<3.16`, `python-dotenv>=1.1.0`, `anyio>=4.5` and `pydantic>=2.8.0,<2.13`, subject to their transitive requirements. MCP 1.22 is the tested floor for direct `CallToolResult` error responses. CI checks both locked and lowest resolvable dependencies. pymodbus 3.10 renamed the unit-id keyword from `slave` to `device_id`; the adapter uses whichever the installed version accepts.
 
 ## Configuration
 
