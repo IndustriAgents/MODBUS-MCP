@@ -27,7 +27,7 @@ from ..domain.model import (
 from ..protocol.hints import DEVICE_WRITE, READ_ONLY
 
 
-def register_tools(mcp, context_for):
+def register_tools(mcp, context_for, policy=None):
 
     @mcp.tool(annotations=READ_ONLY)
     async def read_register(
@@ -337,4 +337,4 @@ def register_tools(mcp, context_for):
 
     from .contract import install_contract
 
-    install_contract(mcp)
+    install_contract(mcp, policy)

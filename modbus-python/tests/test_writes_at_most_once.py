@@ -1,8 +1,8 @@
 """A write reaches the device at most once; a lost reply is reported, never re-sent.
 
 Reads may be retried. Writes are retried only when nothing was sent: the
-connection could not be opened, or pymodbus raised ConnectionException, which
-it does before sending anything.
+connection could not be opened, or the send counter proves no frame left.
+ConnectionException alone does not establish whether the request was sent.
 """
 
 from __future__ import annotations
@@ -254,3 +254,24 @@ def test_the_real_client_gets_the_frame_counter() -> None:
             client.close()
 
     assert asyncio.run(build())
+
+
+@pytest.mark.parametrize("tracked", [True, False])
+def test_connection_exception_after_send_never_resends_write(client, monkeypatch, tracked) -> None:
+    original = client.write_register
+
+    async def write_then_disconnect(*args, **kwargs):
+        await original(*args, **kwargs)
+        raise ConnectionException("connection failed after write dispatch")
+
+    monkeypatch.setattr(client, "write_register", write_then_disconnect)
+    ctx = make_ctx(client, writes_enabled=True, max_retries=5)
+    if not tracked:
+        ctx.request_context.lifespan_context.frames_sent = None
+    result = run(cli.write_register(1, 50, ctx))
+    assert len(client.sent_writes) == 1
+    assert client.hr[1] == 50
+    assert result["success"] is False
+    assert result["meta"]["outcome"] == "unknown"
+    assert result["meta"]["request_sent"] is True
+    assert result["meta"]["attempts"] == 1

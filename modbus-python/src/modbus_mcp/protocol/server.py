@@ -178,6 +178,24 @@ class ModbusMCP(FastMCP):
         return [TextContent(type="text", text=json.dumps(envelope))]
 
     async def _call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+        tool = self._tool_manager.get_tool(name)
+        if tool is not None:
+            try:
+                tool.fn_metadata.arg_model.model_validate(
+                    tool.fn_metadata.pre_parse_json(arguments)
+                )
+            except ValidationError as exc:
+                meta = {"tool": name}
+                if name in WRITE_TOOLS:
+                    meta.update(outcome="not_sent", request_sent=False)
+                return self._envelope(
+                    tool,
+                    _make_result(
+                        False,
+                        error=f"Invalid arguments: {_describe_validation_error(exc)}",
+                        meta=meta,
+                    ),
+                )
         try:
             return await super().call_tool(name, arguments)
         except ToolError as exc:
@@ -185,16 +203,14 @@ class ModbusMCP(FastMCP):
             if tool is None:
                 raise
             cause = exc.__cause__
-            if isinstance(cause, ValidationError):
-                error = f"Invalid arguments: {_describe_validation_error(cause)}"
-            elif cause is not None:
+            if cause is not None:
                 error = f"Unexpected {type(cause).__name__}: {cause}"
             else:
                 error = str(exc)
             meta: dict[str, Any] = {"tool": name}
             if name in WRITE_TOOLS:
                 state = _CALL.get()
-                if isinstance(cause, ValidationError) or (state is not None and (not state.sent)):
+                if state is not None and (not state.sent):
                     meta.update(outcome="not_sent", request_sent=False)
                 else:
                     meta.update(outcome="unknown", request_sent=True if state else None)

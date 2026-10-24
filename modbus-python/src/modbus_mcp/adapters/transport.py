@@ -173,10 +173,11 @@ async def _retry_call(
 
     A read that fails is retried up to `max_retries` times. A write is sent at
     most once (`write=True`): only attempts that sent nothing - the connection
-    could not be opened, or pymodbus raised ConnectionException, which it does
-    before sending - are retried. Once a write has gone out, a missing or late
-    reply returns WRITE_NO_REPLY; sending it again could apply it twice. (The
-    pymodbus client is created with retries=0 for the same reason; see
+    could not be opened, or the send counter proves no frame left - are
+    retried. A ConnectionException alone is not proof of non-dispatch. Once a
+    write has gone out, a missing or late reply returns WRITE_NO_REPLY; sending
+    it again could apply it twice. (The pymodbus client is created with
+    retries=0 for the same reason; see
     _make_client.) The underlying error, if any, goes to `details["cause"]`.
 
     `check(reply)` says whether the reply belongs to this request (function code,
@@ -253,6 +254,10 @@ async def _retry_call(
             last_err = f"cannot reach device at {settings.target}"
             details["cause"] = f"{type(e).__name__}: {e}"
             await ctx.error(f"{op} failed on attempt {attempt}: {details['cause']}")
+            if write and _sent_since(app, frames_before) is not False:
+                # A client/library can fail with this exception after sending.
+                # Trust the send fence, not the exception name, before retrying.
+                return (None, WRITE_NO_REPLY, elapsed_ms(), attempt)
         except (ModbusException, asyncio.TimeoutError, ConnectionError, OSError) as e:
             cause = f"{type(e).__name__}: {e}"
             await ctx.error(f"{op} failed on attempt {attempt}: {cause}")

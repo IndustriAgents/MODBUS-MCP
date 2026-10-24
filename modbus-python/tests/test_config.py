@@ -27,6 +27,7 @@ MODBUS_VARS = [
     "MODBUS_RETRY_BACKOFF_BASE",
     "MODBUS_TOOL_TIMEOUT",
     "MODBUS_WRITES_ENABLED",
+    "MODBUS_POLICY_FILE",
     "REGISTER_MAP_FILE",
 ]
 
@@ -218,8 +219,9 @@ def _checkout(root, *, name="modbus-mcp", installed=False):
     return package
 
 
-def test_the_implicit_env_is_only_the_projects_own(tmp_path) -> None:
-    package = _checkout(tmp_path)
+@pytest.mark.parametrize("name", ["modbus-mcp", "industriagents-modbus-mcp"])
+def test_the_implicit_env_is_only_the_projects_own(tmp_path, name) -> None:
+    package = _checkout(tmp_path, name=name)
     (tmp_path / ".env").write_text("MODBUS_PORT=1\n")  # a parent of the project
     assert cli.implicit_dotenv(package) is None
     own = tmp_path / "modbus-python" / ".env"
@@ -324,7 +326,12 @@ def test_main_reads_the_env_file_argument(tmp_path) -> None:
 
 
 def test_importing_the_server_does_not_read_the_environment() -> None:
-    env = clean_env(MODBUS_PORT="not-a-port", MODBUS_TYPE="bogus", REGISTER_MAP_FILE="/nope.json")
+    env = clean_env(
+        MODBUS_PORT="not-a-port",
+        MODBUS_TYPE="bogus",
+        REGISTER_MAP_FILE="/nope.json",
+        MODBUS_POLICY_FILE="/missing-policy.json",
+    )
     proc = subprocess.run(
         [
             sys.executable,
@@ -338,6 +345,40 @@ def test_importing_the_server_does_not_read_the_environment() -> None:
     )
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip() == "17"
+
+
+def test_main_resolves_policy_from_explicit_env_file(no_modbus_env, tmp_path):
+    policy = tmp_path / "policy.json"
+    policy.write_text('{"read_only": true, "max_in_flight": 2}')
+    environment = tmp_path / "settings.env"
+    environment.write_text(f"MODBUS_POLICY_FILE={policy}\n")
+    observed = []
+    no_modbus_env.setattr(cli, "_config", None)
+    no_modbus_env.setattr(
+        cli.mcp.contract_boundary, "execution", cli.mcp.contract_boundary.execution
+    )
+    no_modbus_env.setattr(
+        cli.mcp, "run", lambda: observed.append(cli.mcp.contract_boundary.execution.policy)
+    )
+    cli.main(["--env-file", str(environment)])
+    assert observed[0].read_only is True
+    assert observed[0].max_in_flight == 2
+
+
+def test_main_rejects_invalid_policy_on_stderr_only(tmp_path):
+    policy = tmp_path / "policy.json"
+    policy.write_text('{"read_only": "false"}')
+    proc = subprocess.run(
+        [sys.executable, "-m", "modbus_mcp"],
+        env=clean_env(MODBUS_POLICY_FILE=str(policy)),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert proc.returncode == 2
+    assert proc.stdout == ""
+    assert "configuration error" in proc.stderr and "read_only must be a boolean" in proc.stderr
 
 
 @pytest.mark.parametrize(

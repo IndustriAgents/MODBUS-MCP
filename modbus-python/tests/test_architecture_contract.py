@@ -203,3 +203,196 @@ def test_only_declared_local_status_tools_use_reserved_capacity():
         result = envelope_of(run(b.call_tool(name, args)))
         assert result["success"] is (name in local_names), name
     b.execution.finish(ticket, None)
+
+
+def test_bounded_requests_refuse_before_dispatch_or_audit(monkeypatch):
+    b, calls = boundary()
+    name = next(n for n, t in b.tools.items() if not t["annotations"].get("readOnlyHint"))
+    schema = b.tools[name]["inputSchema"]
+    base = sample(schema.get("oneOf", [schema])[0])
+    audits = []
+    monkeypatch.setattr(b.execution.audit, "record", lambda *args: audits.append(args))
+    deep = []
+    for _ in range(b.contract["limits"]["maxNestingDepth"] + 1):
+        deep = [deep]
+    cycle = []
+    cycle.append(cycle)
+    oversized = [None] * (b.contract["limits"]["maxContainerItems"] + 1)
+    broad = [[None] * 10000 for _ in range(6)]
+    for payload in [
+        deep,
+        cycle,
+        oversized,
+        broad,
+        "x" * (b.execution.policy.max_request_bytes + 1),
+    ]:
+        value = envelope_of(run(b.call_tool(name, {**base, "oversized": payload})))
+        assert value["success"] is False
+        assert value["meta"]["code"] == "resource_limit"
+        assert (value["meta"]["outcome"], value["meta"]["request_sent"]) == ("not_sent", False)
+    assert calls == audits == []
+    assert b.execution.active == b.execution.controls == 0
+
+
+@pytest.mark.parametrize(
+    "payload", [float("nan"), float("inf"), object(), {1: "invalid key"}, "\ud800"]
+)
+def test_non_json_arguments_fail_as_envelopes(payload):
+    b, calls = boundary()
+    name = next(iter(b.tools))
+    value = envelope_of(run(b.call_tool(name, {"invalid": payload})))
+    assert value["success"] is False
+    assert value["meta"]["code"] == "invalid_arguments"
+    assert calls == []
+
+
+def test_request_limits_include_exact_escaped_encoding_and_edges():
+    from modbus_mcp.protocol.request_limits import RequestError, validate_request
+
+    limits = {"maxNestingDepth": 2, "maxContainerItems": 2, "maxTotalValues": 4}
+    validate_request({"a": [1, 2]}, 1024, limits)
+    with pytest.raises(RequestError, match="maxNestingDepth"):
+        validate_request({"a": [[1]]}, 1024, limits)
+    with pytest.raises(RequestError, match="maxContainerItems"):
+        validate_request({"a": [1, 2, 3]}, 1024, limits)
+    with pytest.raises(RequestError, match="max_request_bytes"):
+        validate_request({"a": "\u0000" * 200}, 1024, limits)
+
+
+def test_unexpected_write_failure_is_uncertain_and_does_not_leak_payload():
+    b, calls = boundary()
+    name = next(n for n, t in b.tools.items() if not t["annotations"].get("readOnlyHint"))
+    schema = b.tools[name]["inputSchema"]
+    args = sample(schema.get("oneOf", [schema])[0])
+
+    async def crash(*args):
+        raise RuntimeError("private-payload-value")
+
+    b.original_call = crash
+    result = run(b.wire_call(name, args))
+    assert result.isError is True
+    value = result.structuredContent
+    assert value["meta"]["outcome"] == "unknown"
+    assert value["meta"]["request_sent"] is None
+    assert "private-payload-value" not in result.content[0].text
+    assert b.execution.active == b.execution.controls == 0
+
+
+@pytest.mark.parametrize("text_only", [False, True])
+def test_audit_result_failure_preserves_outcome_and_text_parity(monkeypatch, text_only):
+    b, calls = boundary()
+    name = next(n for n, t in b.tools.items() if not t["annotations"].get("readOnlyHint"))
+    schema = b.tools[name]["inputSchema"]
+    args = sample(schema.get("oneOf", [schema])[0])
+
+    def record(ticket, phase, result):
+        if phase == "result":
+            raise OSError("audit unavailable after send")
+
+    async def written(*args):
+        result = as_result(
+            {
+                "success": True,
+                "data": None,
+                "error": None,
+                "meta": {"outcome": "written", "request_sent": True},
+            }
+        )
+
+        return result[0] if text_only else result
+
+    b.original_call = written
+    monkeypatch.setattr(b.execution.audit, "record", record)
+    result = run(b.call_tool(name, args))
+    value = envelope_of(result)
+    assert json.loads(result[0][0].text) == value
+    assert value["success"] is True
+    assert value["meta"] == {"outcome": "written", "request_sent": True, "audit_error": True}
+    assert b.execution.active == b.execution.controls == 0
+
+
+def test_cancellation_releases_admission_without_retry():
+    async def exercise():
+        b, _ = boundary(Policy(max_in_flight=1))
+        name = next(n for n, t in b.tools.items() if not t["annotations"].get("readOnlyHint"))
+        schema = b.tools[name]["inputSchema"]
+        args = sample(schema.get("oneOf", [schema])[0])
+        started = asyncio.Event()
+        calls = []
+
+        async def wait(*args):
+            calls.append(args)
+            started.set()
+            await asyncio.Event().wait()
+
+        b.original_call = wait
+        task = asyncio.create_task(b.call_tool(name, args))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert len(calls) == 1
+        assert b.execution.active == b.execution.controls == 0
+
+    run(exercise())
+
+
+def test_unknown_arguments_rejected_on_direct_routes_and_legacy_aliases():
+    b, calls = boundary()
+    for name, schema in b.contract["legacySchemas"].items():
+        args = sample(schema)
+        args["misspelled_parameter"] = "do not dispatch"
+        value = envelope_of(run(b.call_tool(name, args)))
+        assert value["success"] is False, name
+        assert value["meta"]["code"] == "invalid_arguments", name
+    assert calls == []
+
+
+@pytest.mark.parametrize("failure", ["runtime", "validation"])
+def test_native_wrapper_never_calls_post_send_validation_error_not_sent(failure):
+    from mcp.types import ToolAnnotations
+    from pydantic import BaseModel
+
+    from modbus_mcp.infrastructure.control_context import _CALL
+    from modbus_mcp.protocol.server import ModbusMCP
+
+    class Reply(BaseModel):
+        count: int
+
+    server = ModbusMCP("post-send-error-test")
+    sends = []
+
+    @server.tool(annotations=ToolAnnotations(destructiveHint=True, readOnlyHint=False))
+    async def mask_write_register(address: int, and_mask: int, or_mask: int) -> dict:
+        sends.append(True)
+        _CALL.get().frames += 1
+        if failure == "validation":
+            Reply.model_validate({"count": "invalid"})
+        raise RuntimeError("private-device-result")
+
+    b = install_contract(server, Policy())
+    refused = run(b.wire_call("mask_write_register", {"address": {}, "and_mask": 2, "or_mask": 3}))
+    assert refused.structuredContent["meta"]["outcome"] == "not_sent"
+    assert sends == []
+    result = run(b.wire_call("mask_write_register", {"address": 1, "and_mask": 2, "or_mask": 3}))
+    assert result.isError is True
+    assert result.structuredContent["meta"]["outcome"] == "unknown"
+    assert result.structuredContent["meta"]["request_sent"] is True
+    assert len(sends) == 1
+    assert b.execution.active == b.execution.controls == 0
+
+
+def test_oversized_requests_are_not_copied_before_limit_check():
+    class NoCopyDict(dict):
+        def items(self):
+            raise AssertionError("routing copied oversized arguments")
+
+    b, calls = boundary()
+    name, route = next((n, r) for n, r in b.contract["routes"].items() if "selector" in r)
+    arguments = NoCopyDict(
+        {str(i): None for i in range(b.contract["limits"]["maxContainerItems"] + 1)}
+    )
+    arguments[route["selector"]] = next(iter(route["options"]))
+    result = envelope_of(run(b.call_tool(name, arguments)))
+    assert result["meta"]["code"] == "resource_limit"
+    assert calls == []

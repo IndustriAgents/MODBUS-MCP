@@ -27,6 +27,7 @@ from .adapters.transport import _with_timeout as _with_timeout
 from .application.diagnostics import list_tags as list_tags
 from .application.diagnostics import ping as ping
 from .application.diagnostics import read_device_information as read_device_information
+from .application.execution import Execution
 from .application.read import _chunked_read as _chunked_read
 from .application.read import _read_typed as _read_typed
 from .application.read import read_coils as read_coils
@@ -87,6 +88,7 @@ from .domain.model import _span_error as _span_error
 from .domain.model import _unknown_tag as _unknown_tag
 from .domain.model import _unscale as _unscale
 from .domain.model import reply_check as reply_check
+from .domain.policy import Policy
 from .infrastructure.control_context import _CALL as _CALL
 from .infrastructure.control_context import DEADLINE_BACKSTOP as DEADLINE_BACKSTOP
 from .infrastructure.control_context import _abandoned as _abandoned
@@ -109,7 +111,7 @@ GATE_VARIABLES = ("MODBUS_WRITES_ENABLED",)
 OWN_EXTRAS = ("REGISTER_MAP_FILE",)
 PACKAGE_DIR = Path(__file__).resolve().parent
 _EXPORT_PREFIX = re.compile("^\\s*export\\s+", re.IGNORECASE)
-_PROJECT_NAME = re.compile('^name\\s*=\\s*"modbus-mcp"\\s*$', re.MULTILINE)
+_PROJECT_NAME = re.compile('^name\\s*=\\s*"(?:industriagents-)?modbus-mcp"\\s*$', re.MULTILINE)
 
 
 def implicit_dotenv(package_dir: Path = PACKAGE_DIR) -> Path | None:
@@ -117,7 +119,8 @@ def implicit_dotenv(package_dir: Path = PACKAGE_DIR) -> Path | None:
 
     It is found relative to the package source (src/modbus_mcp -> ../../.env) and
     only when that directory is this project (its pyproject.toml names
-    modbus-mcp). Never the working directory or a parent directory: the working
+    industriagents-modbus-mcp, or its legacy modbus-mcp name). Never the working
+    directory or a parent directory: the working
     directory is wherever the MCP client launched the server, which may be an
     untrusted project, and settings such as the host or the tag map decide where
     a write goes. An installed package (site-packages) has no implicit .env; use
@@ -283,8 +286,15 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     global _config
     try:
-        _config = load_config(args.env_file)
-    except ConfigError as exc:
+        environment = read_environment(args.env_file)
+        settings = Settings.from_env(environment)
+        _config = (settings, load_tag_map(settings.register_map_file))
+        # Resolve policy alongside connection settings, after --env-file. The
+        # compatibility module instance must not capture import-time settings.
+        mcp.contract_boundary.execution = Execution.from_environment(
+            "modbus", environment=environment
+        )
+    except (ValueError, OSError) as exc:
         sys.stderr.write(f"modbus-mcp: configuration error: {exc}\n")
         raise SystemExit(2) from None
     mcp.run()
@@ -294,7 +304,7 @@ def context_for(ctx):
     return OperationContext(_app(ctx), ctx.info, ctx.error)
 
 
-def _make_server(configuration=None):
+def _make_server(configuration=None, policy=None):
     server = ModbusMCP(
         name="Modbus MCP Server",
         instructions=(
@@ -313,16 +323,16 @@ def _make_server(configuration=None):
     )
     server.configuration = configuration
     server._mcp_server.version = __version__
-    register_tools(server, context_for)
+    register_tools(server, context_for, policy)
     return server
 
 
-def create_server(configuration=None):
+def create_server(configuration=None, policy=None):
     """Build an independent instance with a configuration snapshot."""
-    return _make_server(configuration if configuration is not None else load_config())
+    return _make_server(configuration if configuration is not None else load_config(), policy)
 
 
-mcp = _make_server()
+mcp = _make_server(policy=Policy())
 
 
 def _legacy_context_call(fn):

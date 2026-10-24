@@ -10,19 +10,16 @@ import time
 from pathlib import Path
 
 repo = Path(__file__).resolve().parents[1]
-stem = (
-    json.loads((repo / "npm/package.json").read_text())["name"]
-    .removeprefix("industriagents-")
-    .removesuffix("-mcp")
-)
+package = json.loads((repo / "npm/package.json").read_text())
+stem = package["name"].removeprefix("industriagents-").removesuffix("-mcp")
 mode = sys.argv[1]
-wheel = next((repo / "npm/vendor").glob("*.whl"))
+wheel = repo / "npm/vendor" / (package["name"].replace("-", "_") + "-" + package["version"] + "-py3-none-any.whl")
 temporary = tempfile.TemporaryDirectory(prefix="protocol-package-smoke-")
 artifact_root = Path(temporary.name)
 shutil.copy2(wheel, artifact_root / wheel.name)
 wheel = artifact_root / wheel.name
 if mode == "npm":
-    tarball = next((repo / "npm").glob("*.tgz"))
+    tarball = repo / "npm" / (package["name"] + "-" + package["version"] + ".tgz")
     subprocess.run(
         [
             "npm",
@@ -131,7 +128,8 @@ try:
         }
     )
     init = response(1)
-    assert init["result"]["serverInfo"]["version"] == "0.3.0", init
+    expected_version = package["version"]
+    assert init["result"]["serverInfo"]["version"] == expected_version, init
     send({"jsonrpc": "2.0", "method": "notifications/initialized"})
     send({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
     tools = response(2)["result"]["tools"]

@@ -123,6 +123,12 @@ unknown, not success. Failure to persist a result is logged and marked
 Audit records omit payloads and credentials. Manage file retention externally;
 this append-only log is not a tamper-proof external audit service.
 
+Policy documents are read only from regular files, with a 64 KiB read bound and
+at most 16 JSON nesting levels. Duplicate fields are rejected. The size bound
+still applies if a file grows during the read. Audit destinations must also be
+regular files; devices and pipes are refused before any audit record is written.
+A FIFO cannot block policy loading or audit admission while waiting for a peer.
+
 ## Protocol capability limits
 
 TCP, UDP and serial/RTU use pymodbus. Four address tables remain distinct; addresses are zero-based. Typed read codecs preserve byte order, word order and scaling. Raw write_values accepts a list even for a single register/coil; mask_write_register stays distinct because its device operation is different.
@@ -151,3 +157,53 @@ consolidated routes, unknown/mixed arguments, legacy-policy bypass, independent
 admission state, durable intent failure and MCP error envelopes. npm tests
 check the bundled version, argument boundaries, exit status and missing-uv
 errors. See [release.md](release.md) for the registry workflow.
+
+## Request and failure bounds
+
+Every call is bounded before selector forwarding, JSON encoding, schema
+validation, policy admission or device I/O. Contract limits are 32 nesting
+levels, 10,000 entries per container and 50,000 total values; the deployment
+policy additionally bounds serialized request bytes. Non-finite numbers,
+non-JSON values, invalid Unicode and non-string object keys are rejected.
+These checks bound work after the MCP SDK has decoded the transport frame.
+
+Consolidated selector modes validate their complete contract schemas. Legacy
+names and direct routes retain their established native validation and coercion,
+including their error details; unknown top-level keys are always refused.
+MCP input-model validation runs before the handler. A validation exception
+raised inside a handler is an execution failure and cannot prove a control was
+not sent. Unexpected execution failures preserve an uncertain outcome; native
+send tracking remains authoritative when available. Neither case adds retries.
+
+An audit-result failure adds `meta.audit_error` to the same envelope used for
+both text content and structured content, including text-only native results.
+Cancellation releases admission capacity and retains an unknown audit outcome
+when no result was observed.
+
+### Configuration and remaining native boundary
+
+The CLI resolves `MODBUS_POLICY_FILE` together with connection settings after
+`--env-file`, and reports invalid policies as configuration errors on stderr.
+Importing the compatibility server does not load process policy. Independent
+`create_server(configuration, policy)` instances may receive an explicit policy.
+The implicit project `.env` lookup recognizes both the current distribution
+name and its legacy name; it still never searches the caller's working directory.
+
+Application modules currently call the adapter's `_retry_call` and unit-keyword
+helpers. Recovery therefore remains coupled to the existing Modbus transport
+helper rather than a fully injected OPCUA-style execution port. Native retries,
+send fences and reply correlation retain their existing ownership and tests.
+
+## Retry evidence
+
+Write retry eligibility uses the per-call send counter. A `ConnectionException`
+can occur after dispatch, so its class alone never authorizes replay: if a
+frame was sent, or send tracking is unavailable, the call returns an uncertain
+outcome after one attempt. A proven pre-send connection failure can still
+reconnect and retry. Reads retain their existing retry rules. Regression tests
+count native sends after a write applies and then raises a connection error.
+
+The application currently calls the established transport recovery helpers
+directly. This coupling is retained to keep the existing send-fence and
+cancellation pipeline intact; it is an explicit difference from OPCUA-MCP's
+fully injected execution ports.
