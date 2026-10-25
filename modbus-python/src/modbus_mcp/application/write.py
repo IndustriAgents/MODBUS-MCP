@@ -4,7 +4,6 @@ from typing import Annotated, Any
 from pydantic import Field
 
 from .. import codec
-from ..adapters.transport import _unit
 from ..application.request import _request
 from ..domain.model import (
     MAX_WRITE_COILS,
@@ -39,14 +38,16 @@ async def write_register(
     client = app.modbus_client
 
     async def _call():
-        return await client.write_register(address=address, value=value, **_unit(client, slave_id))
+        return await client.write_register(
+            address=address, value=value, **ctx.transport.unit(client, slave_id)
+        )
 
-    op = f"write_register addr={address} value={value} slave={slave_id}"
+    op = f"write_register addr={address} slave={slave_id}"
     check = reply_check(6, echo={"address": address, "registers": [value]})
     _, failure = await _request(ctx, app, op, _call, meta, check=check, write=True)
     if failure:
         return failure
-    await ctx.info(f"Wrote {value} to register {address} on slave {slave_id}")
+    await ctx.info(f"Wrote register {address} on slave {slave_id}")
     return _make_result(True, data={"written": value}, meta=meta)
 
 
@@ -65,15 +66,17 @@ async def write_coil(
     client = app.modbus_client
 
     async def _call():
-        return await client.write_coil(address=address, value=value, **_unit(client, slave_id))
+        return await client.write_coil(
+            address=address, value=value, **ctx.transport.unit(client, slave_id)
+        )
 
-    op = f"write_coil addr={address} value={value} slave={slave_id}"
+    op = f"write_coil addr={address} slave={slave_id}"
     pdu = struct.pack(">BHH", 5, address, 65280 if value else 0)
     check = reply_check(5, echo={"address": address, "bits": [value]}, raw=(pdu, app.last_reply))
     _, failure = await _request(ctx, app, op, _call, meta, check=check, write=True)
     if failure:
         return failure
-    await ctx.info(f"Wrote {value} to coil {address} on slave {slave_id}")
+    await ctx.info(f"Wrote coil {address} on slave {slave_id}")
     return _make_result(True, data={"written": value}, meta=meta)
 
 
@@ -111,7 +114,7 @@ async def write_registers(
 
     async def _call():
         return await client.write_registers(
-            address=address, values=values, **_unit(client, slave_id)
+            address=address, values=values, **ctx.transport.unit(client, slave_id)
         )
 
     op = f"write_registers addr={address} n={len(values)} slave={slave_id}"
@@ -150,7 +153,9 @@ async def write_coils_bulk(
     client = app.modbus_client
 
     async def _call():
-        return await client.write_coils(address=address, values=values, **_unit(client, slave_id))
+        return await client.write_coils(
+            address=address, values=values, **ctx.transport.unit(client, slave_id)
+        )
 
     op = f"write_coils addr={address} n={len(values)} slave={slave_id}"
     check = reply_check(15, echo={"address": address, "count": len(values)})
@@ -179,10 +184,13 @@ async def mask_write_register(
 
     async def _call():
         return await client.mask_write_register(
-            address=address, and_mask=and_mask, or_mask=or_mask, **_unit(client, slave_id)
+            address=address,
+            and_mask=and_mask,
+            or_mask=or_mask,
+            **ctx.transport.unit(client, slave_id),
         )
 
-    op = f"mask_write_register addr={address} and={and_mask} or={or_mask} slave={slave_id}"
+    op = f"mask_write_register addr={address} slave={slave_id}"
     echo = {"address": address, "and_mask": and_mask, "or_mask": or_mask}
     check = reply_check(22, echo=echo)
     _, failure = await _request(ctx, app, op, _call, meta, check=check, write=True)

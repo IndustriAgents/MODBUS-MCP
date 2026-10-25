@@ -5,7 +5,6 @@ from typing import Annotated, Any
 from pydantic import Field
 
 from .. import codec
-from ..adapters.transport import _retry_call, _unit
 from ..application.request import _request
 from ..domain.model import (
     MAX_READ_BITS,
@@ -65,7 +64,7 @@ async def _chunked_read(
         op = f"{label}[{current}:{current + size - 1}]"
         details: dict[str, Any] = {}
         check = reply_check(function_code, **{attr: size})
-        result, err, duration_ms, attempts = await _retry_call(
+        result, err, duration_ms, attempts = await ctx.transport.request(
             ctx, app, op, functools.partial(read_func, current, size), details=details, check=check
         )
         if err is not None:
@@ -96,7 +95,7 @@ async def read_register(address: Address, ctx: Any, slave_id: SlaveId = None) ->
 
     async def _call():
         return await client.read_holding_registers(
-            address=address, count=1, **_unit(client, slave_id)
+            address=address, count=1, **ctx.transport.unit(client, slave_id)
         )
 
     op = f"read_register addr={address} slave={slave_id}"
@@ -104,7 +103,7 @@ async def read_register(address: Address, ctx: Any, slave_id: SlaveId = None) ->
     if failure:
         return failure
     value = result.registers[0]
-    await ctx.info(f"Read register {address} from slave {slave_id}: {value}")
+    await ctx.info(f"Read register {address} from slave {slave_id}")
     return _make_result(True, data={"value": value}, meta=meta)
 
 
@@ -119,7 +118,9 @@ async def read_coils(
         ctx,
         app,
         "read_coils",
-        lambda start, size: client.read_coils(address=start, count=size, **_unit(client, slave_id)),
+        lambda start, size: client.read_coils(
+            address=start, count=size, **ctx.transport.unit(client, slave_id)
+        ),
         address,
         count,
         MAX_READ_BITS,
@@ -145,7 +146,7 @@ async def read_input_registers(
         app,
         "read_input_registers",
         lambda start, size: client.read_input_registers(
-            address=start, count=size, **_unit(client, slave_id)
+            address=start, count=size, **ctx.transport.unit(client, slave_id)
         ),
         address,
         count,
@@ -172,7 +173,7 @@ async def read_multiple_holding_registers(
         app,
         "read_holding_registers",
         lambda start, size: client.read_holding_registers(
-            address=start, count=size, **_unit(client, slave_id)
+            address=start, count=size, **ctx.transport.unit(client, slave_id)
         ),
         address,
         count,
@@ -199,7 +200,7 @@ async def read_discrete_inputs(
         app,
         "read_discrete_inputs",
         lambda start, size: client.read_discrete_inputs(
-            address=start, count=size, **_unit(client, slave_id)
+            address=start, count=size, **ctx.transport.unit(client, slave_id)
         ),
         address,
         count,
@@ -246,7 +247,7 @@ async def _read_typed(
         ctx,
         app,
         f"read_{table}_registers",
-        lambda start, sz: method(address=start, count=sz, **_unit(client, slave_id)),
+        lambda start, sz: method(address=start, count=sz, **ctx.transport.unit(client, slave_id)),
         address,
         size * count,
         MAX_READ_REGISTERS,

@@ -103,7 +103,7 @@ def test_unknown_tools_are_still_protocol_errors() -> None:
 
 def test_every_tool_has_a_description_and_documented_parameters() -> None:
     tools = asyncio.run(cli.mcp.list_tools())
-    assert len(tools) == 6
+    assert len(tools) == 7
     for tool in tools:
         assert tool.description and tool.description.strip(), tool.name
         props = tool.inputSchema.get("properties", {})

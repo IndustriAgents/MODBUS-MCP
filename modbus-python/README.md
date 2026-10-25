@@ -1,6 +1,6 @@
 > **0.3.0 package and tool migration:** Install `industriagents-modbus-mcp`
 > from npm (requires uv) or PyPI; the command remains `modbus-mcp`.
-> The advertised catalog now contains **6 tools**. Older tool names in
+> The advertised catalog now contains **7 tools**. Older tool names in
 > the examples below remain compatibility calls. See the
 > [architecture and canonical tool guide](../docs/architecture.md)
 > and [release guide](../docs/release.md).
@@ -320,3 +320,5 @@ This server is derived from [kukapay/modbus-mcp](https://github.com/kukapay/modb
 ## License
 
 MIT — see [LICENSE](../LICENSE). It names both copyright holders: IndustriAgents, and kukapay for the portions derived from kukapay/modbus-mcp (see [Acknowledgements](#acknowledgements)).
+
+Inspect `get_connection_status` before device work: its `capabilities` describe backend support and native configuration gates, not device permissions or reachability. See the [protocol assessment](https://github.com/IndustriAgents/MODBUS-MCP/blob/main/docs/protocol-assessment.md) for supported workflows and verification boundaries.

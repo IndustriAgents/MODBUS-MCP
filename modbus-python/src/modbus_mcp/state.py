@@ -3,7 +3,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from .config import Settings, Tag
-from .domain.ports import ModbusClientPort
+from .domain.ports import ModbusClientPort, ModbusTransportPort
 
 
 @dataclass
@@ -25,3 +25,4 @@ class OperationContext:
     app: AppContext
     info: Callable
     error: Callable
+    transport: ModbusTransportPort

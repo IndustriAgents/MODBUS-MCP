@@ -547,7 +547,77 @@
           "success": {
             "type": "boolean"
           },
-          "data": {},
+          "data": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "value": {
+                        "type": [
+                          "null",
+                          "boolean",
+                          "number",
+                          "string",
+                          "array",
+                          "object"
+                        ],
+                        "description": "Protocol-typed JSON value; its datatype and encoding are described by the operation metadata."
+                      }
+                    },
+                    "additionalProperties": true,
+                    "required": [
+                      "value"
+                    ]
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "values": {
+                        "type": "array",
+                        "items": {
+                          "type": [
+                            "null",
+                            "boolean",
+                            "number",
+                            "string",
+                            "array",
+                            "object"
+                          ],
+                          "description": "Protocol-typed JSON value; its datatype and encoding are described by the operation metadata."
+                        }
+                      }
+                    },
+                    "additionalProperties": true,
+                    "required": [
+                      "values"
+                    ]
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "registers": {
+                        "type": "array",
+                        "items": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 65535
+                        }
+                      }
+                    },
+                    "additionalProperties": true,
+                    "required": [
+                      "registers"
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
           "error": {
             "type": [
               "string",
@@ -555,7 +625,61 @@
             ]
           },
           "meta": {
-            "type": "object"
+            "type": "object",
+            "properties": {
+              "tool": {
+                "type": "string"
+              },
+              "code": {
+                "type": "string"
+              },
+              "outcome": {
+                "type": "string",
+                "description": "Native operation outcome. unknown means the action may have applied and must not be automatically replayed."
+              },
+              "request_sent": {
+                "type": [
+                  "boolean",
+                  "null"
+                ],
+                "description": "False proves no dispatch; null means the boundary has no dispatch evidence."
+              },
+              "duration_ms": {
+                "type": "number"
+              },
+              "attempts": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "complete": {
+                "type": "boolean"
+              },
+              "pages": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "audit_error": {
+                "type": "boolean"
+              },
+              "backend": {
+                "type": "string"
+              },
+              "simulated": {
+                "type": "boolean"
+              },
+              "value_encoding": {
+                "const": "decimal_string"
+              },
+              "encoded_integer_paths": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "JSON pointers to exact decimal strings for integers outside the interoperable JSON safe range."
+              }
+            },
+            "additionalProperties": true,
+            "description": "Protocol-specific diagnostics and completeness. Absence of a field does not establish success, freshness or physical completion."
           }
         },
         "additionalProperties": false
@@ -789,7 +913,29 @@
           "success": {
             "type": "boolean"
           },
-          "data": {},
+          "data": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "written": {
+                    "type": [
+                      "integer",
+                      "boolean"
+                    ],
+                    "description": "Acknowledged value for legacy scalar writes, or acknowledged item count for batch writes; not physical completion."
+                  }
+                },
+                "additionalProperties": true,
+                "required": [
+                  "written"
+                ]
+              }
+            ]
+          },
           "error": {
             "type": [
               "string",
@@ -797,7 +943,61 @@
             ]
           },
           "meta": {
-            "type": "object"
+            "type": "object",
+            "properties": {
+              "tool": {
+                "type": "string"
+              },
+              "code": {
+                "type": "string"
+              },
+              "outcome": {
+                "type": "string",
+                "description": "Native operation outcome. unknown means the action may have applied and must not be automatically replayed."
+              },
+              "request_sent": {
+                "type": [
+                  "boolean",
+                  "null"
+                ],
+                "description": "False proves no dispatch; null means the boundary has no dispatch evidence."
+              },
+              "duration_ms": {
+                "type": "number"
+              },
+              "attempts": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "complete": {
+                "type": "boolean"
+              },
+              "pages": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "audit_error": {
+                "type": "boolean"
+              },
+              "backend": {
+                "type": "string"
+              },
+              "simulated": {
+                "type": "boolean"
+              },
+              "value_encoding": {
+                "const": "decimal_string"
+              },
+              "encoded_integer_paths": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "JSON pointers to exact decimal strings for integers outside the interoperable JSON safe range."
+              }
+            },
+            "additionalProperties": true,
+            "description": "Protocol-specific diagnostics and completeness. Absence of a field does not establish success, freshness or physical completion."
           }
         },
         "additionalProperties": false
@@ -866,7 +1066,36 @@
           "success": {
             "type": "boolean"
           },
-          "data": {},
+          "data": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "address": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "and_mask": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "or_mask": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "additionalProperties": true,
+                "required": [
+                  "address",
+                  "and_mask",
+                  "or_mask"
+                ]
+              }
+            ]
+          },
           "error": {
             "type": [
               "string",
@@ -874,7 +1103,61 @@
             ]
           },
           "meta": {
-            "type": "object"
+            "type": "object",
+            "properties": {
+              "tool": {
+                "type": "string"
+              },
+              "code": {
+                "type": "string"
+              },
+              "outcome": {
+                "type": "string",
+                "description": "Native operation outcome. unknown means the action may have applied and must not be automatically replayed."
+              },
+              "request_sent": {
+                "type": [
+                  "boolean",
+                  "null"
+                ],
+                "description": "False proves no dispatch; null means the boundary has no dispatch evidence."
+              },
+              "duration_ms": {
+                "type": "number"
+              },
+              "attempts": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "complete": {
+                "type": "boolean"
+              },
+              "pages": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "audit_error": {
+                "type": "boolean"
+              },
+              "backend": {
+                "type": "string"
+              },
+              "simulated": {
+                "type": "boolean"
+              },
+              "value_encoding": {
+                "const": "decimal_string"
+              },
+              "encoded_integer_paths": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "JSON pointers to exact decimal strings for integers outside the interoperable JSON safe range."
+              }
+            },
+            "additionalProperties": true,
+            "description": "Protocol-specific diagnostics and completeness. Absence of a field does not establish success, freshness or physical completion."
           }
         },
         "additionalProperties": false
@@ -887,7 +1170,7 @@
     },
     {
       "name": "read_device_information",
-      "description": "Read the device identification objects (function 43 / MEI type 14).\n\n    data maps object ids to text: 0 VendorName, 1 ProductCode, 2 MajorMinorRevision,\n    3 VendorUrl, 4 ProductName, 5 ModelName, 6 UserApplicationName.\n    ",
+      "description": "Read the device identification objects (function 43 / MEI type 14).\n\n    data maps object ids to text: 0 VendorName, 1 ProductCode, 2 MajorMinorRevision,\n    3 VendorUrl, 4 ProductName, 5 ModelName, 6 UserApplicationName.\n     Follows bounded continuation pages. meta.complete indicates whether all requested objects were obtained; failures retain accepted partial data.",
       "inputSchema": {
         "properties": {
           "slave_id": {
@@ -938,7 +1221,23 @@
           "success": {
             "type": "boolean"
           },
-          "data": {},
+          "data": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "patternProperties": {
+                  "^[0-9]+$": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false,
+                "description": "Device-identification object IDs as decimal keys and decoded text values. Partial pages are retained on failure; inspect meta.complete and meta.pages."
+              }
+            ]
+          },
           "error": {
             "type": [
               "string",
@@ -946,7 +1245,61 @@
             ]
           },
           "meta": {
-            "type": "object"
+            "type": "object",
+            "properties": {
+              "tool": {
+                "type": "string"
+              },
+              "code": {
+                "type": "string"
+              },
+              "outcome": {
+                "type": "string",
+                "description": "Native operation outcome. unknown means the action may have applied and must not be automatically replayed."
+              },
+              "request_sent": {
+                "type": [
+                  "boolean",
+                  "null"
+                ],
+                "description": "False proves no dispatch; null means the boundary has no dispatch evidence."
+              },
+              "duration_ms": {
+                "type": "number"
+              },
+              "attempts": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "complete": {
+                "type": "boolean"
+              },
+              "pages": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "audit_error": {
+                "type": "boolean"
+              },
+              "backend": {
+                "type": "string"
+              },
+              "simulated": {
+                "type": "boolean"
+              },
+              "value_encoding": {
+                "const": "decimal_string"
+              },
+              "encoded_integer_paths": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "JSON pointers to exact decimal strings for integers outside the interoperable JSON safe range."
+              }
+            },
+            "additionalProperties": true,
+            "description": "Protocol-specific diagnostics and completeness. Absence of a field does not establish success, freshness or physical completion."
           }
         },
         "additionalProperties": false
@@ -976,7 +1329,63 @@
           "success": {
             "type": "boolean"
           },
-          "data": {},
+          "data": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "tags": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string"
+                        },
+                        "address": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "table": {
+                          "type": "string"
+                        },
+                        "count": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "slave_id": {
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        },
+                        "dtype": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "scale": {
+                          "type": "number"
+                        },
+                        "offset": {
+                          "type": "number"
+                        }
+                      },
+                      "additionalProperties": true
+                    }
+                  }
+                },
+                "additionalProperties": true,
+                "required": [
+                  "tags"
+                ]
+              }
+            ]
+          },
           "error": {
             "type": [
               "string",
@@ -984,7 +1393,61 @@
             ]
           },
           "meta": {
-            "type": "object"
+            "type": "object",
+            "properties": {
+              "tool": {
+                "type": "string"
+              },
+              "code": {
+                "type": "string"
+              },
+              "outcome": {
+                "type": "string",
+                "description": "Native operation outcome. unknown means the action may have applied and must not be automatically replayed."
+              },
+              "request_sent": {
+                "type": [
+                  "boolean",
+                  "null"
+                ],
+                "description": "False proves no dispatch; null means the boundary has no dispatch evidence."
+              },
+              "duration_ms": {
+                "type": "number"
+              },
+              "attempts": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "complete": {
+                "type": "boolean"
+              },
+              "pages": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "audit_error": {
+                "type": "boolean"
+              },
+              "backend": {
+                "type": "string"
+              },
+              "simulated": {
+                "type": "boolean"
+              },
+              "value_encoding": {
+                "const": "decimal_string"
+              },
+              "encoded_integer_paths": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "JSON pointers to exact decimal strings for integers outside the interoperable JSON safe range."
+              }
+            },
+            "additionalProperties": true,
+            "description": "Protocol-specific diagnostics and completeness. Absence of a field does not establish success, freshness or physical completion."
           }
         },
         "additionalProperties": false
@@ -1038,7 +1501,98 @@
           "success": {
             "type": "boolean"
           },
-          "data": {},
+          "data": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "connected": {
+                    "type": "boolean"
+                  },
+                  "device_reachable": {
+                    "type": "boolean"
+                  },
+                  "probe_address": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "probe_slave_id": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "probe_response": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "probe_latency_ms": {
+                    "type": "number"
+                  },
+                  "probe_error": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "type": {
+                    "type": "string"
+                  },
+                  "host": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "port": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "serial_port": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "writes_enabled": {
+                    "type": "boolean"
+                  },
+                  "max_retries": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "tool_timeout": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "tag_count": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "additionalProperties": true,
+                "required": [
+                  "connected",
+                  "device_reachable",
+                  "probe_address",
+                  "probe_slave_id",
+                  "probe_response",
+                  "probe_latency_ms",
+                  "probe_error",
+                  "type",
+                  "writes_enabled",
+                  "tag_count"
+                ]
+              }
+            ]
+          },
           "error": {
             "type": [
               "string",
@@ -1046,13 +1600,255 @@
             ]
           },
           "meta": {
-            "type": "object"
+            "type": "object",
+            "properties": {
+              "tool": {
+                "type": "string"
+              },
+              "code": {
+                "type": "string"
+              },
+              "outcome": {
+                "type": "string",
+                "description": "Native operation outcome. unknown means the action may have applied and must not be automatically replayed."
+              },
+              "request_sent": {
+                "type": [
+                  "boolean",
+                  "null"
+                ],
+                "description": "False proves no dispatch; null means the boundary has no dispatch evidence."
+              },
+              "duration_ms": {
+                "type": "number"
+              },
+              "attempts": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "complete": {
+                "type": "boolean"
+              },
+              "pages": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "audit_error": {
+                "type": "boolean"
+              },
+              "backend": {
+                "type": "string"
+              },
+              "simulated": {
+                "type": "boolean"
+              },
+              "value_encoding": {
+                "const": "decimal_string"
+              },
+              "encoded_integer_paths": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "JSON pointers to exact decimal strings for integers outside the interoperable JSON safe range."
+              }
+            },
+            "additionalProperties": true,
+            "description": "Protocol-specific diagnostics and completeness. Absence of a field does not establish success, freshness or physical completion."
           }
         },
         "additionalProperties": false
       },
       "annotations": {
         "readOnlyHint": true
+      }
+    },
+    {
+      "name": "get_connection_status",
+      "description": "Report the configured endpoint, last connection state and backend capabilities without device I/O. Capabilities describe backend support and configuration gates, not device permissions or verified reachability. Use ping to probe the configured device.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "success",
+          "data",
+          "error",
+          "meta"
+        ],
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "data": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "capabilities"
+                ],
+                "properties": {
+                  "capabilities": {
+                    "type": "object",
+                    "required": [
+                      "protocol",
+                      "backend",
+                      "simulated",
+                      "scope",
+                      "device_verified",
+                      "operations",
+                      "prerequisites",
+                      "limitations",
+                      "authorization"
+                    ],
+                    "properties": {
+                      "protocol": {
+                        "const": "modbus"
+                      },
+                      "backend": {
+                        "type": "string"
+                      },
+                      "simulated": {
+                        "type": "boolean"
+                      },
+                      "scope": {
+                        "const": "backend_support"
+                      },
+                      "device_verified": {
+                        "const": false
+                      },
+                      "operations": {
+                        "type": "object",
+                        "required": [
+                          "read_values",
+                          "write_values",
+                          "mask_write_register",
+                          "read_device_information",
+                          "list_tags",
+                          "ping",
+                          "get_connection_status"
+                        ],
+                        "additionalProperties": {
+                          "type": "object",
+                          "required": [
+                            "supported",
+                            "enabled"
+                          ],
+                          "properties": {
+                            "supported": {
+                              "type": "boolean"
+                            },
+                            "enabled": {
+                              "type": "boolean"
+                            },
+                            "reason": {
+                              "type": "string"
+                            }
+                          },
+                          "additionalProperties": false
+                        }
+                      },
+                      "prerequisites": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "limitations": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "authorization": {
+                        "type": "string"
+                      },
+                      "transport": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "meta": {
+            "type": "object",
+            "properties": {
+              "tool": {
+                "type": "string"
+              },
+              "code": {
+                "type": "string"
+              },
+              "outcome": {
+                "type": "string",
+                "description": "Native operation outcome. unknown means the action may have applied and must not be automatically replayed."
+              },
+              "request_sent": {
+                "type": [
+                  "boolean",
+                  "null"
+                ],
+                "description": "False proves no dispatch; null means the boundary has no dispatch evidence."
+              },
+              "duration_ms": {
+                "type": "number"
+              },
+              "attempts": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "complete": {
+                "type": "boolean"
+              },
+              "pages": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "audit_error": {
+                "type": "boolean"
+              },
+              "backend": {
+                "type": "string"
+              },
+              "simulated": {
+                "type": "boolean"
+              },
+              "value_encoding": {
+                "const": "decimal_string"
+              },
+              "encoded_integer_paths": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "JSON pointers to exact decimal strings for integers outside the interoperable JSON safe range."
+              }
+            },
+            "additionalProperties": true,
+            "description": "Protocol-specific diagnostics and completeness. Absence of a field does not establish success, freshness or physical completion."
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     }
   ],
@@ -1067,7 +1863,8 @@
         "holding_typed": "read_holding_typed",
         "input_typed": "read_input_typed",
         "tag": "read_tag"
-      }
+      },
+      "resultShape": "read_values"
     },
     "write_values": {
       "selector": "target",
@@ -1075,19 +1872,28 @@
         "holding": "write_registers",
         "coils": "write_coils_bulk",
         "tag": "write_tag"
-      }
+      },
+      "resultShape": "write_values"
     },
     "mask_write_register": {
-      "handler": "mask_write_register"
+      "handler": "mask_write_register",
+      "resultShape": "mask_write_register"
     },
     "read_device_information": {
-      "handler": "read_device_information"
+      "handler": "read_device_information",
+      "resultShape": "read_device_information"
     },
     "list_tags": {
-      "handler": "list_tags"
+      "handler": "list_tags",
+      "resultShape": "list_tags"
     },
     "ping": {
-      "handler": "ping"
+      "handler": "ping",
+      "resultShape": "ping"
+    },
+    "get_connection_status": {
+      "handler": "get_connection_status",
+      "resultShape": "get_connection_status"
     }
   },
   "legacy": {
@@ -1801,6 +2607,11 @@
       "title": "pingArguments",
       "type": "object",
       "additionalProperties": false
+    },
+    "get_connection_status": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
     }
   },
   "resultSchema": {
@@ -1829,11 +2640,350 @@
     "additionalProperties": false
   },
   "localStatusTools": [
-    "list_tags"
+    "list_tags",
+    "get_connection_status"
   ],
   "limits": {
     "maxNestingDepth": 32,
     "maxContainerItems": 10000,
     "maxTotalValues": 50000
+  },
+  "resultShapes": {
+    "read_values": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": [
+                "null",
+                "boolean",
+                "number",
+                "string",
+                "array",
+                "object"
+              ],
+              "description": "Protocol-typed JSON value; its datatype and encoding are described by the operation metadata."
+            }
+          },
+          "additionalProperties": true,
+          "required": [
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "values": {
+              "type": "array",
+              "items": {
+                "type": [
+                  "null",
+                  "boolean",
+                  "number",
+                  "string",
+                  "array",
+                  "object"
+                ],
+                "description": "Protocol-typed JSON value; its datatype and encoding are described by the operation metadata."
+              }
+            }
+          },
+          "additionalProperties": true,
+          "required": [
+            "values"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "registers": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 65535
+              }
+            }
+          },
+          "additionalProperties": true,
+          "required": [
+            "registers"
+          ]
+        }
+      ]
+    },
+    "write_values": {
+      "type": "object",
+      "properties": {
+        "written": {
+          "type": [
+            "integer",
+            "boolean"
+          ],
+          "description": "Acknowledged value for legacy scalar writes, or acknowledged item count for batch writes; not physical completion."
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "written"
+      ]
+    },
+    "mask_write_register": {
+      "type": "object",
+      "properties": {
+        "address": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "and_mask": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "or_mask": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "address",
+        "and_mask",
+        "or_mask"
+      ]
+    },
+    "read_device_information": {
+      "type": "object",
+      "patternProperties": {
+        "^[0-9]+$": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Device-identification object IDs as decimal keys and decoded text values. Partial pages are retained on failure; inspect meta.complete and meta.pages."
+    },
+    "list_tags": {
+      "type": "object",
+      "properties": {
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "address": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "table": {
+                "type": "string"
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "slave_id": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "dtype": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "scale": {
+                "type": "number"
+              },
+              "offset": {
+                "type": "number"
+              }
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "tags"
+      ]
+    },
+    "ping": {
+      "type": "object",
+      "properties": {
+        "connected": {
+          "type": "boolean"
+        },
+        "device_reachable": {
+          "type": "boolean"
+        },
+        "probe_address": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "probe_slave_id": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "probe_response": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "probe_latency_ms": {
+          "type": "number"
+        },
+        "probe_error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "type": "string"
+        },
+        "host": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "port": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "serial_port": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "writes_enabled": {
+          "type": "boolean"
+        },
+        "max_retries": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tool_timeout": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "tag_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": true,
+      "required": [
+        "connected",
+        "device_reachable",
+        "probe_address",
+        "probe_slave_id",
+        "probe_response",
+        "probe_latency_ms",
+        "probe_error",
+        "type",
+        "writes_enabled",
+        "tag_count"
+      ]
+    },
+    "get_connection_status": {
+      "type": "object",
+      "required": [
+        "capabilities"
+      ],
+      "properties": {
+        "capabilities": {
+          "type": "object",
+          "required": [
+            "protocol",
+            "backend",
+            "simulated",
+            "scope",
+            "device_verified",
+            "operations",
+            "prerequisites",
+            "limitations",
+            "authorization"
+          ],
+          "properties": {
+            "protocol": {
+              "const": "modbus"
+            },
+            "backend": {
+              "type": "string"
+            },
+            "simulated": {
+              "type": "boolean"
+            },
+            "scope": {
+              "const": "backend_support"
+            },
+            "device_verified": {
+              "const": false
+            },
+            "operations": {
+              "type": "object",
+              "required": [
+                "read_values",
+                "write_values",
+                "mask_write_register",
+                "read_device_information",
+                "list_tags",
+                "ping",
+                "get_connection_status"
+              ],
+              "additionalProperties": {
+                "type": "object",
+                "required": [
+                  "supported",
+                  "enabled"
+                ],
+                "properties": {
+                  "supported": {
+                    "type": "boolean"
+                  },
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "prerequisites": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "limitations": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "authorization": {
+              "type": "string"
+            },
+            "transport": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
   }
 }

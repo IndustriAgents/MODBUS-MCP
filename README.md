@@ -1,6 +1,6 @@
 > **0.3.0 package and tool migration:** Install `industriagents-modbus-mcp`
 > from npm (requires uv) or PyPI; the command remains `modbus-mcp`.
-> The advertised catalog now contains **6 tools**. Older tool names in
+> The advertised catalog now contains **7 tools**. Older tool names in
 > the examples below remain compatibility calls. See the
 > [architecture and canonical tool guide](docs/architecture.md)
 > and [release guide](docs/release.md).
@@ -28,7 +28,7 @@ It is part of the [IndustriConnect](https://github.com/IndustriAgents/IndustriCo
 - Reliability: reads retried with backoff, an overall deadline per tool call (`MODBUS_CALL_TIMEOUT`), automatic chunking of large reads; starts without the device and connects on first use, reconnects after a drop
 - Replies are checked against their request (function code, count, echoed values), and after a request goes unanswered the connection is reset (on a serial line after a quiet period of `MODBUS_TIMEOUT`), so a late reply is not taken for another request's (Modbus RTU replies carry no transaction id). On a serial line, a reply later than twice `MODBUS_TIMEOUT` can still be mistaken; set `MODBUS_TIMEOUT` above the device's worst-case response time
 - Tool annotations: write tools are marked destructive and not idempotent, read tools read-only, so MCP clients do not treat a write as safe to retry
-- Health: `ping` sends a real Modbus request and reports whether the device answered, plus the configuration
+- Health: `get_connection_status` inspects configuration and backend capabilities without device I/O; `ping` sends a real Modbus request and reports whether the device answered
 - Structured results: every tool returns `{ success, data, error, meta }`, including for invalid arguments and device exceptions; arguments must be JSON integers and booleans of the right type (no `"5"`, `5.0` or `1` for `true`)
 
 ## Repo Layout
@@ -315,3 +315,5 @@ Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Questions 
 ## License
 
 MIT — see [LICENSE](LICENSE). `modbus-python/` is derived from [kukapay/modbus-mcp](https://github.com/kukapay/modbus-mcp) (MIT), so the license names two copyright holders: IndustriAgents, and kukapay for the portions taken from it. kukapay's original license text is kept in [modbus-python/LICENSE-kukapay](modbus-python/LICENSE-kukapay).
+
+Inspect `get_connection_status` before device work: its `capabilities` describe backend support and native configuration gates, not device permissions or reachability. See the [protocol assessment](docs/protocol-assessment.md) for supported workflows and verification boundaries.
