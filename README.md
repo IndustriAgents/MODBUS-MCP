@@ -317,3 +317,9 @@ Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Questions 
 MIT — see [LICENSE](LICENSE). `modbus-python/` is derived from [kukapay/modbus-mcp](https://github.com/kukapay/modbus-mcp) (MIT), so the license names two copyright holders: IndustriAgents, and kukapay for the portions taken from it. kukapay's original license text is kept in [modbus-python/LICENSE-kukapay](modbus-python/LICENSE-kukapay).
 
 Inspect `get_connection_status` before device work: its `capabilities` describe backend support and native configuration gates, not device permissions or reachability. See the [protocol assessment](docs/protocol-assessment.md) for supported workflows and verification boundaries.
+
+## Additional protocol workflows
+
+Use `write_values` with `target="holding_readwrite"`, `read_address`, `read_count`, `write_address` and `values` for one FC23 write-before-read transaction (read 1..125 / write 1..121). It requires the write gate and device FC23 support; uncertain outcomes are never replayed.
+
+See [the protocol assessment and prioritized roadmap](docs/protocol-assessment.md) for limits, evidence and remaining work.

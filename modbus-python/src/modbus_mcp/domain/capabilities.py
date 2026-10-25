@@ -25,9 +25,11 @@ def capability_report(
         "scope": "backend_support",
         "device_verified": False,
         "operations": operations,
+        "function_codes": [1, 2, 3, 4, 5, 6, 15, 16, 22, 23, 43],
         "prerequisites": [
             "A configured TCP/UDP endpoint or serial interface and correct unit ID are required.",
             "Device register maps supply types, units and scaling; the protocol cannot infer them.",
+            "FC23 combined read/write requires device support; no fallback write/read is sent.",
         ],
         "limitations": [
             "TLS/Modbus Security and native subscriptions are not implemented.",

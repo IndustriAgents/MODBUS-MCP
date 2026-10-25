@@ -26,6 +26,7 @@ WRITE_TOOLS = frozenset(
     {
         "write_register",
         "write_registers",
+        "readwrite_registers",
         "write_coil",
         "write_coils_bulk",
         "mask_write_register",
@@ -37,6 +38,7 @@ REFUSED = frozenset({1, 2, 3, 6, 10})
 MAX_READ_REGISTERS = 125
 MAX_READ_BITS = 2000
 MAX_WRITE_REGISTERS = 123
+MAX_READWRITE_REGISTERS = 121
 MAX_WRITE_COILS = 1968
 ADDRESS_SPACE = 65536
 _EXCEPTION_NAMES = {

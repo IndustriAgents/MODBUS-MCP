@@ -322,3 +322,5 @@ This server is derived from [kukapay/modbus-mcp](https://github.com/kukapay/modb
 MIT — see [LICENSE](../LICENSE). It names both copyright holders: IndustriAgents, and kukapay for the portions derived from kukapay/modbus-mcp (see [Acknowledgements](#acknowledgements)).
 
 Inspect `get_connection_status` before device work: its `capabilities` describe backend support and native configuration gates, not device permissions or reachability. See the [protocol assessment](https://github.com/IndustriAgents/MODBUS-MCP/blob/main/docs/protocol-assessment.md) for supported workflows and verification boundaries.
+
+The `write_values` mode `holding_readwrite` routes to `application.write.readwrite_registers` and the existing injected transport port. FC23 has one write-before-read native invocation with both ranges validated first; the transport treats the whole transaction as a write for send tracking, cancellation and no replay. Serial targets require unit IDs1..247. No FC16/FC3 fallback is performed.

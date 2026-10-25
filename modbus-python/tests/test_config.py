@@ -344,7 +344,7 @@ def test_importing_the_server_does_not_read_the_environment() -> None:
         timeout=60,
     )
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.strip() == "18"
+    assert proc.stdout.strip() == "19"
 
 
 def test_main_resolves_policy_from_explicit_env_file(no_modbus_env, tmp_path):

@@ -34,7 +34,7 @@ scaling and engineering meaning; native values are not self-describing telemetry
 | Inspect: `get_connection_status` | Previously only network `ping` and local tag listing | New local seventh tool exposes configured target, cached connection state and typed capabilities without I/O; `test_capabilities.py`, artifact smoke | Not a liveness probe or device authorization |
 | Read: `read_values` | Four tables, typed reads and aliases; bounded chunks | Existing request/reply checks preserved; transport injected through a domain port | Chunked reads are not an atomic snapshot; scaling comes from a configured map |
 | Identify: `read_device_information` | Previously returned only first FC43/14 page | Bounded continuation, matching MEI/read code, object count/IDs, progress and partial error reporting; `test_identity_continuation.py` | Device may not implement FC43 or optional/private objects |
-| Controls: `write_values`, `mask_write_register` | Native gate, validation, send tracking, explicit uncertain outcomes | Native invocation kept behind injected transport; application logs omit values/masks; `test_application_ports.py` plus existing send-once/wire suites | Acknowledgement is not physical completion; no automatic replay after possible send |
+| Controls: `write_values`, `mask_write_register` | Native gate, validation, send tracking, explicit uncertain outcomes, FC23 write-before-read | Native invocation kept behind injected transport; application logs omit values/masks; `test_application_ports.py` plus existing send-once/wire suites | Acknowledgement is not physical completion; no automatic replay after possible send |
 | Metadata and liveness: `list_tags`, `ping` | Configured maps and an explicit holding-register probe | Preserved, offline status complements rather than changes ping | Even an exception can prove reachability without proving an address exists |
 | Native subscriptions, TLS/security, automatic map discovery | Not implemented | Explicit limitations in capability report | Requires separate feature design and device support; no invented equivalents |
 
@@ -79,3 +79,39 @@ coerce a returned decimal string through a floating-point number before writing.
 Modbus clients can use the preserved raw 16-bit register representation for exact
 large-integer writes. This change prevents silent rounding in JSON consumers and
 is an intentional output compatibility change for unsafe large integers.
+
+## Second improvement pass: FC23 write-before-read transactions
+
+`write_values(target="holding_readwrite", read_address=40, read_count=2,
+write_address=40, values=[65535, 123])` sends one Read/Write Multiple Registers
+request (function 23 / 0x17). It writes first, then reads the requested holding
+range. Overlapping ranges are valid. `data.written` is the acknowledged count;
+`data.registers` is the read range, not an echo of the requested write. This does
+not establish a PLC scan snapshot or physical process completion.
+
+[Modbus Application Protocol V1.1b3 section 6.17](https://www.modbus.org/file/secure/modbusprotocolspecification.pdf)
+specifies one transaction, the operation order, read quantity 1..125 and write
+quantity 1..121. Both address spans and every uint16 value are validated before
+I/O. The operation is never split into multiple requests. The existing
+`MODBUS_WRITES_ENABLED` gate, policy, serialized transport and send-once controls
+apply; reads embedded in FC23 do not make it read-only or retryable. Exception 5
+(Acknowledge/deferred completion), lost replies and malformed replies remain
+`outcome="unknown"`, without replay. A response must have FC23 and exactly the
+requested read count. Unsupported-function exceptions remain explicit failures.
+
+[PyModbus's documented `readwrite_registers` API](https://pymodbus.readthedocs.io/en/v3.15.0/source/client.html)
+is invoked directly with the existing version-compatible unit-ID adapter. The
+local real Modbus TCP integration verifies overlap/write-before-read; focused
+fixtures cover quantity/range/gate validation, reply mismatch, deferred completion
+and a write applied despite a lost response. No physical device was accessed.
+
+### Prioritized remaining improvements
+
+1. Add bounded file-record/FIFO reads only with device-specific fixtures and
+   explicit support reporting; not all servers implement optional functions.
+2. Add a commissioned schema format for units/quality/sampling descriptions;
+   register numbers alone cannot identify engineering semantics.
+3. Modbus Security/TLS needs an explicitly selected and verified secure transport;
+   physical acceptance should cover TCP, UDP and serial device behavior separately.
+
+FC23 requires serial unit IDs 1..247, rejecting broadcast 0 and reserved 248..255 before any send: [Modbus Serial Guide V1.02 §2.1](https://www.modbus.org/file/secure/modbusoverserial.pdf) assigns it to broadcasts, which return no reply. TCP unit ID 0 remains permitted because direct TCP server routing differs.

@@ -687,7 +687,7 @@
     },
     {
       "name": "write_values",
-      "description": "Select one target mode and provide only its parameters.\n\nholding: Write consecutive holding registers in one request (function 16).\n\n    Only works when MODBUS_WRITES_ENABLED=true; otherwise nothing is sent and\n    success is false. The write is sent at most once. meta.outcome says what\n    happened: written (acknowledged), rejected (refused with an exception that\n    means nothing was done), not_sent, or unknown (no reply, a reply that does\n    not match, or an exception that does not rule a write out: it may have been\n    applied, so check before retrying); meta.request_sent says whether the\n    request went out.\n    \n\ncoils: Write consecutive coils in one request (function 15).\n\n    Only works when MODBUS_WRITES_ENABLED=true; otherwise nothing is sent and\n    success is false. The write is sent at most once. meta.outcome says what\n    happened: written (acknowledged), rejected (refused with an exception that\n    means nothing was done), not_sent, or unknown (no reply, a reply that does\n    not match, or an exception that does not rule a write out: it may have been\n    applied, so check before retrying); meta.request_sent says whether the\n    request went out.\n    \n\ntag: Write a named holding-register or coil tag from the tag map.\n\n    Holding-register values are in the same units read_tag returns: the tag's\n    scale and offset are reversed, then the value is encoded with its dtype\n    (default uint16) and byte/word order. Input and discrete-input tags are\n    read-only. Only works when MODBUS_WRITES_ENABLED=true; otherwise nothing is\n    sent and success is false. meta.outcome and meta.request_sent work as in\n    write_register.\n    ",
+      "description": "Select one target mode and provide only its parameters.\n\nholding: Write consecutive holding registers in one request (function 16).\n\n    Only works when MODBUS_WRITES_ENABLED=true; otherwise nothing is sent and\n    success is false. The write is sent at most once. meta.outcome says what\n    happened: written (acknowledged), rejected (refused with an exception that\n    means nothing was done), not_sent, or unknown (no reply, a reply that does\n    not match, or an exception that does not rule a write out: it may have been\n    applied, so check before retrying); meta.request_sent says whether the\n    request went out.\n    \n\ncoils: Write consecutive coils in one request (function 15).\n\n    Only works when MODBUS_WRITES_ENABLED=true; otherwise nothing is sent and\n    success is false. The write is sent at most once. meta.outcome says what\n    happened: written (acknowledged), rejected (refused with an exception that\n    means nothing was done), not_sent, or unknown (no reply, a reply that does\n    not match, or an exception that does not rule a write out: it may have been\n    applied, so check before retrying); meta.request_sent says whether the\n    request went out.\n    \n\ntag: Write a named holding-register or coil tag from the tag map.\n\n    Holding-register values are in the same units read_tag returns: the tag's\n    scale and offset are reversed, then the value is encoded with its dtype\n    (default uint16) and byte/word order. Input and discrete-input tags are\n    read-only. Only works when MODBUS_WRITES_ENABLED=true; otherwise nothing is\n    sent and success is false. meta.outcome and meta.request_sent work as in\n    write_register.\n    \n\nholding_readwrite: FC23 writes 1..121 holding registers at write_address before reading 1..125 at read_address, in one transaction. Supply read_count and values; ranges may overlap. Requires MODBUS_WRITES_ENABLED=true and device support. No splitting or replay after possible dispatch. data.registers is the returned read range; data.written is acknowledged write count. This is not a PLC scan snapshot or physical completion check. Serial FC23 requires a nonzero unicast unit ID; broadcast0 is rejected before dispatch.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -754,6 +754,10 @@
               {
                 "const": "tag",
                 "type": "string"
+              },
+              {
+                "type": "string",
+                "const": "holding_readwrite"
               }
             ],
             "description": "Select the target mode described above."
@@ -766,6 +770,26 @@
           "value": {
             "description": "Coil tags: true or false. Holding-register tags: a number, or a list of `count` numbers for a tag with count > 1.",
             "title": "Value"
+          },
+          "read_address": {
+            "description": "Zero-based Modbus address (0-65535).",
+            "maximum": 65535,
+            "minimum": 0,
+            "title": "Address",
+            "type": "integer"
+          },
+          "write_address": {
+            "description": "Zero-based Modbus address (0-65535).",
+            "maximum": 65535,
+            "minimum": 0,
+            "title": "Address",
+            "type": "integer"
+          },
+          "read_count": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 125,
+            "description": "Number of holding registers to read after the write in the same FC23 request (1..125)."
           }
         },
         "required": [
@@ -892,6 +916,71 @@
             ],
             "type": "object",
             "additionalProperties": false
+          },
+          {
+            "properties": {
+              "values": {
+                "description": "1..121 uint16 values, written before the read in one FC23 request.",
+                "items": {
+                  "description": "Unsigned 16-bit register value (0-65535).",
+                  "maximum": 65535,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "maxItems": 121,
+                "minItems": 1,
+                "title": "Values",
+                "type": "array"
+              },
+              "slave_id": {
+                "anyOf": [
+                  {
+                    "maximum": 255,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Modbus unit/slave ID (0-255); omit to use MODBUS_DEFAULT_SLAVE_ID.",
+                "title": "Slave Id"
+              },
+              "target": {
+                "const": "holding_readwrite",
+                "type": "string"
+              },
+              "read_address": {
+                "description": "Zero-based Modbus address (0-65535).",
+                "maximum": 65535,
+                "minimum": 0,
+                "title": "Address",
+                "type": "integer"
+              },
+              "write_address": {
+                "description": "Zero-based Modbus address (0-65535).",
+                "maximum": 65535,
+                "minimum": 0,
+                "title": "Address",
+                "type": "integer"
+              },
+              "read_count": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 125,
+                "description": "Number of holding registers to read after the write in the same FC23 request (1..125)."
+              }
+            },
+            "required": [
+              "target",
+              "read_address",
+              "read_count",
+              "write_address",
+              "values"
+            ],
+            "type": "object",
+            "additionalProperties": false
           }
         ]
       },
@@ -927,6 +1016,17 @@
                       "boolean"
                     ],
                     "description": "Acknowledged value for legacy scalar writes, or acknowledged item count for batch writes; not physical completion."
+                  },
+                  "registers": {
+                    "type": "array",
+                    "items": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 65535
+                    },
+                    "minItems": 1,
+                    "maxItems": 125,
+                    "description": "FC23 read range observed after the write, in the same protocol transaction."
                   }
                 },
                 "additionalProperties": true,
@@ -994,6 +1094,13 @@
                   "type": "string"
                 },
                 "description": "JSON pointers to exact decimal strings for integers outside the interoperable JSON safe range."
+              },
+              "function_code": {
+                "type": "integer"
+              },
+              "operation_order": {
+                "const": "write_then_read",
+                "description": "FC23 protocol ordering only; does not imply physical completion or scan consistency."
               }
             },
             "additionalProperties": true,
@@ -1771,6 +1878,13 @@
                       },
                       "transport": {
                         "type": "string"
+                      },
+                      "function_codes": {
+                        "type": "array",
+                        "items": {
+                          "type": "integer"
+                        },
+                        "description": "Functions supported by this backend; individual device support is not inferred."
                       }
                     }
                   }
@@ -1871,7 +1985,8 @@
       "options": {
         "holding": "write_registers",
         "coils": "write_coils_bulk",
-        "tag": "write_tag"
+        "tag": "write_tag",
+        "holding_readwrite": "readwrite_registers"
       },
       "resultShape": "write_values"
     },
@@ -1913,7 +2028,8 @@
     "mask_write_register": "mask_write_register",
     "read_device_information": "read_device_information",
     "list_tags": "list_tags",
-    "ping": "ping"
+    "ping": "ping",
+    "readwrite_registers": "write_values"
   },
   "legacySchemas": {
     "read_register": {
@@ -2612,6 +2728,66 @@
       "type": "object",
       "properties": {},
       "additionalProperties": false
+    },
+    "readwrite_registers": {
+      "properties": {
+        "values": {
+          "description": "1..121 uint16 values, written before the read in one FC23 request.",
+          "items": {
+            "description": "Unsigned 16-bit register value (0-65535).",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maxItems": 121,
+          "minItems": 1,
+          "title": "Values",
+          "type": "array"
+        },
+        "slave_id": {
+          "anyOf": [
+            {
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Modbus unit/slave ID (0-255); omit to use MODBUS_DEFAULT_SLAVE_ID.",
+          "title": "Slave Id"
+        },
+        "read_address": {
+          "description": "Zero-based Modbus address (0-65535).",
+          "maximum": 65535,
+          "minimum": 0,
+          "title": "Address",
+          "type": "integer"
+        },
+        "write_address": {
+          "description": "Zero-based Modbus address (0-65535).",
+          "maximum": 65535,
+          "minimum": 0,
+          "title": "Address",
+          "type": "integer"
+        },
+        "read_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 125,
+          "description": "Number of holding registers to read after the write in the same FC23 request (1..125)."
+        }
+      },
+      "required": [
+        "read_address",
+        "read_count",
+        "write_address",
+        "values"
+      ],
+      "type": "object",
+      "additionalProperties": false
     }
   },
   "resultSchema": {
@@ -2722,6 +2898,17 @@
             "boolean"
           ],
           "description": "Acknowledged value for legacy scalar writes, or acknowledged item count for batch writes; not physical completion."
+        },
+        "registers": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65535
+          },
+          "minItems": 1,
+          "maxItems": 125,
+          "description": "FC23 read range observed after the write, in the same protocol transaction."
         }
       },
       "additionalProperties": true,
@@ -2980,6 +3167,13 @@
             },
             "transport": {
               "type": "string"
+            },
+            "function_codes": {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              },
+              "description": "Functions supported by this backend; individual device support is not inferred."
             }
           }
         }

@@ -8,6 +8,7 @@ from ..application import diagnostics as diagnostics_operations
 from ..application import read as read_operations
 from ..application import write as write_operations
 from ..domain.model import (
+    MAX_READWRITE_REGISTERS,
     MAX_WRITE_COILS,
     MAX_WRITE_REGISTERS,
     Address,
@@ -147,6 +148,28 @@ def register_tools(mcp, context_for, policy=None):
         request went out.
         """
         return await write_operations.write_registers(address, values, context_for(ctx), slave_id)
+
+    @mcp.tool(annotations=DEVICE_WRITE)
+    async def readwrite_registers(
+        read_address: Address,
+        read_count: Annotated[int, Field(strict=True, ge=1, le=125)],
+        write_address: Address,
+        values: Annotated[
+            list[RegisterValue], Field(min_length=1, max_length=MAX_READWRITE_REGISTERS)
+        ],
+        ctx: Context,
+        slave_id: SlaveId = None,
+    ) -> dict[str, Any]:
+        """Write 1..121 and then read 1..125 holding registers in one FC23 request.
+
+        Requires MODBUS_WRITES_ENABLED=true and device FC23 support. Ranges may
+        overlap; the write precedes the read. No split, read-back retry or replay
+        after possible dispatch. An acknowledgement is not physical completion
+        or a PLC scan snapshot. Lost/mismatched replies leave the write unknown.
+        """
+        return await write_operations.readwrite_registers(
+            read_address, read_count, write_address, values, context_for(ctx), slave_id
+        )
 
     @mcp.tool(annotations=DEVICE_WRITE)
     async def write_coils_bulk(
