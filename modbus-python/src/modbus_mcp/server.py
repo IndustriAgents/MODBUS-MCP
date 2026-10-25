@@ -40,6 +40,7 @@ from .application.read import read_register as read_register
 from .application.read import read_tag as read_tag
 from .application.request import _request as _request
 from .application.write import mask_write_register as mask_write_register
+from .application.write import readwrite_registers as readwrite_registers
 from .application.write import write_coil as write_coil
 from .application.write import write_coils_bulk as write_coils_bulk
 from .application.write import write_register as write_register
@@ -371,6 +372,7 @@ for _legacy_name in (
     "write_coils_bulk",
     "write_register",
     "write_registers",
+    "readwrite_registers",
     "write_tag",
     "_request",
 ):

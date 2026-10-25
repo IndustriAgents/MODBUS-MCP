@@ -63,6 +63,7 @@ class FakeClient:
         "write_register": 6,
         "write_coils": 15,
         "write_registers": 16,
+        "readwrite_registers": 23,
         "mask_write_register": 22,
         "read_device_information": 43,
     }
@@ -169,6 +170,23 @@ class FakeClient:
             FakeResponse(function_code=16, address=address, count=len(values))
         )
 
+    async def readwrite_registers(
+        self, *, read_address, read_count, write_address, values, device_id=1
+    ):
+        err = self._enter(
+            "readwrite_registers", address=write_address, count=len(values), device_id=device_id
+        )
+        if read_address + read_count > self.SIZE:
+            err = FakeResponse(function_code=23, error=2)
+        if err:
+            return err
+        self.hr[write_address : write_address + len(values)] = values
+        return await self._reply(
+            FakeResponse(
+                function_code=23, registers=self.hr[read_address : read_address + read_count]
+            )
+        )
+
     async def write_coil(self, address, value, *, device_id=1):
         err = self._enter("write_coil", address=address, value=value, device_id=device_id)
         if not err:
@@ -206,11 +224,11 @@ class FakeClient:
 
     @property
     def writes(self) -> list[str]:
-        return [name for name, _ in self.calls if name.startswith(("write", "mask"))]
+        return [name for name, _ in self.calls if name.startswith(("write", "mask", "readwrite"))]
 
     @property
     def sent_writes(self) -> list[str]:
-        return [name for name, _ in self.sent if name.startswith(("write", "mask"))]
+        return [name for name, _ in self.sent if name.startswith(("write", "mask", "readwrite"))]
 
 
 class FakeContext:

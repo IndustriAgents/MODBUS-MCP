@@ -246,3 +246,71 @@ async def write_tag(
     result = await write_registers(tag.address, regs, ctx, tag.slave_id)
     result["meta"].update(tag=name, raw_values=raw)
     return result
+
+
+async def readwrite_registers(
+    read_address: Address,
+    read_count: int,
+    write_address: Address,
+    values: list[int],
+    ctx: Any,
+    slave_id: SlaveId = None,
+) -> dict[str, Any]:
+    """FC23: one write-before-read transaction; never split or replay a sent write."""
+    app = ctx.app
+    slave_id = _slave(app, slave_id)
+    meta = {
+        "read_address": read_address,
+        "read_count": read_count,
+        "write_address": write_address,
+        "slave_id": slave_id,
+        "function_code": 23,
+        "operation_order": "write_then_read",
+    }
+    if not app.settings.writes_enabled:
+        return _not_sent(WRITES_DISABLED, meta=meta)
+    if app.settings.modbus_type == "serial" and not 1 <= slave_id <= 247:
+        return _not_sent(
+            "FC23 requires serial unicast unit ID 1..247; "
+            "broadcast/reserved addresses cannot return read data",
+            meta=meta,
+        )
+    for name, value, lo, hi in (
+        ("read_address", read_address, 0, 65535),
+        ("write_address", write_address, 0, 65535),
+        ("read_count", read_count, 1, 125),
+    ):
+        if type(value) is not int or not lo <= value <= hi:
+            return _not_sent(f"{name} must be an integer in {lo}..{hi}", meta=meta)
+    if not isinstance(values, list) or not 1 <= len(values) <= 121:
+        return _not_sent("values must contain 1..121 registers", meta=meta)
+    if any(type(value) is not int or not 0 <= value <= 65535 for value in values):
+        return _not_sent("values must contain uint16 integers", meta=meta)
+    for address, count in ((read_address, read_count), (write_address, len(values))):
+        if error := _span_error(address, count):
+            return _not_sent(error, meta=meta)
+    client = app.modbus_client
+
+    async def _call():
+        return await client.readwrite_registers(
+            read_address=read_address,
+            read_count=read_count,
+            write_address=write_address,
+            values=values,
+            **ctx.transport.unit(client, slave_id),
+        )
+
+    response, failure = await _request(
+        ctx,
+        app,
+        f"readwrite_registers slave={slave_id}",
+        _call,
+        meta,
+        check=reply_check(23, registers=read_count),
+        write=True,
+    )
+    if failure:
+        return failure
+    return _make_result(
+        True, data={"written": len(values), "registers": response.registers}, meta=meta
+    )

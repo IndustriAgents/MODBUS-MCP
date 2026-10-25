@@ -453,3 +453,19 @@ async def test_canonical_uint64_read_is_lossless_over_stdio(mock, tmp_path):
     assert result["data"]["values"] == ["18446744073709551615"]
     assert result["meta"]["value_encoding"] == "decimal_string"
     assert "/data/values/0" in result["meta"]["encoded_integer_paths"]
+
+
+async def test_fc23_write_before_read_over_real_modbus_tcp(mock, tmp_path):
+    async with server(mock, tmp_path, MODBUS_WRITES_ENABLED="true") as srv:
+        result = await srv.call(
+            "write_values",
+            target="holding_readwrite",
+            read_address=40,
+            read_count=2,
+            write_address=40,
+            values=[65535, 123],
+        )
+        assert result["success"], result
+        assert result["data"] == {"written": 2, "registers": [65535, 123]}
+        assert result["meta"]["attempts"] == 1
+        assert result["meta"]["operation_order"] == "write_then_read"

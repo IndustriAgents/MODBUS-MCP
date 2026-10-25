@@ -226,3 +226,5 @@ reads follow bounded, validated continuation and preserve partial data on failur
 The local status tool is the seventh canonical tool; `ping` remains a device probe.
 
 Edit named `resultShapes` in `contract/tools.json`, run `python3 scripts/sync_contract.py` to regenerate advertised data schemas and the packaged resource, then run `python3 scripts/verify_contract.py` to check drift.
+
+The `write_values` mode `holding_readwrite` routes to `application.write.readwrite_registers` and the existing injected transport port. FC23 has one write-before-read native invocation with both ranges validated first; the transport treats the whole transaction as a write for send tracking, cancellation and no replay. Serial targets require unit IDs 1..247. No FC16/FC3 fallback is performed.
