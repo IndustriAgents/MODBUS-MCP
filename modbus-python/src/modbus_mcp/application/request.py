@@ -1,7 +1,6 @@
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from ..adapters.transport import _retry_call
 from ..domain.model import (
     MAY_HAVE_BEEN_APPLIED,
     REFUSED,
@@ -33,7 +32,7 @@ async def _request(
     "written" or "rejected".
     """
     details: dict[str, Any] = {}
-    result, err, duration_ms, attempts = await _retry_call(
+    result, err, duration_ms, attempts = await ctx.transport.request(
         ctx, app, op, call, write=write, details=details, check=check
     )
     meta.update(duration_ms=round(duration_ms, 3), attempts=attempts)

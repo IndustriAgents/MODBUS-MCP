@@ -2,50 +2,9 @@ from typing import Annotated, Any
 
 from pydantic import Field
 
-from ..adapters.transport import _retry_call, _unit
-from ..application.request import _request
+from ..domain.capabilities import capability_report
 from ..domain.model import SlaveId, _device_error, _is_error, _make_result, _slave, reply_check
-
-
-async def read_device_information(
-    ctx: Any,
-    slave_id: SlaveId = None,
-    read_code: Annotated[
-        int,
-        Field(
-            ge=1,
-            le=4,
-            strict=True,
-            description="1 = basic, 2 = regular, 3 = extended, 4 = one object.",
-        ),
-    ] = 3,
-    object_id: Annotated[
-        int, Field(ge=0, le=255, strict=True, description="First object to read (0 = VendorName).")
-    ] = 0,
-) -> dict[str, Any]:
-    """Read the device identification objects (function 43 / MEI type 14)."""
-    app = ctx.app
-    client = app.modbus_client
-    slave_id = _slave(app, slave_id)
-    meta: dict[str, Any] = {"slave_id": slave_id, "read_code": read_code, "object_id": object_id}
-
-    async def _call():
-        return await client.read_device_information(
-            read_code=read_code, object_id=object_id, **_unit(client, slave_id)
-        )
-
-    op = f"read_device_information slave={slave_id} code={read_code} obj={object_id}"
-    result, failure = await _request(ctx, app, op, _call, meta, check=reply_check(43))
-    if failure:
-        return failure
-    information = getattr(result, "information", None) or {}
-    data = {
-        str(key): value.decode("utf-8", errors="replace")
-        if isinstance(value, (bytes, bytearray))
-        else value
-        for key, value in dict(information).items()
-    }
-    return _make_result(True, data=data, meta=meta)
+from .identity import read_device_information as read_device_information
 
 
 async def list_tags(ctx: Any) -> dict[str, Any]:
@@ -53,6 +12,26 @@ async def list_tags(ctx: Any) -> dict[str, Any]:
     app = ctx.app
     tags = [tag.as_dict() for _, tag in sorted(app.tags.items())]
     return _make_result(True, data={"tags": tags})
+
+
+async def get_connection_status(ctx: Any) -> dict[str, Any]:
+    """Inspect configuration and backend support without connecting or reading."""
+    settings = ctx.app.settings
+    return _make_result(
+        True,
+        data={
+            "connected": bool(getattr(ctx.app.modbus_client, "connected", False)),
+            "type": settings.modbus_type,
+            "target": settings.target,
+            "default_slave_id": settings.default_slave_id,
+            "writes_enabled": settings.writes_enabled,
+            "tag_count": len(ctx.app.tags),
+            "capabilities": capability_report(
+                writes_enabled=settings.writes_enabled,
+                transport=settings.modbus_type,
+            ),
+        },
+    )
 
 
 async def ping(
@@ -71,11 +50,11 @@ async def ping(
 
     async def _probe():
         return await client.read_holding_registers(
-            address=address, count=1, **_unit(client, slave_id)
+            address=address, count=1, **ctx.transport.unit(client, slave_id)
         )
 
     details: dict[str, Any] = {}
-    result, probe_error, probe_ms, _ = await _retry_call(
+    result, probe_error, probe_ms, _ = await ctx.transport.request(
         ctx, app, "ping", _probe, max_retries=0, details=details, check=reply_check(3, registers=1)
     )
     device_reachable = probe_error is None

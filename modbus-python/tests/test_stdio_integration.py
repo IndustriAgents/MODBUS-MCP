@@ -91,7 +91,7 @@ async def test_initialize_reports_this_server(mock, tmp_path) -> None:
         assert info.version == version("industriagents-modbus-mcp")
         assert srv.init.capabilities.tools is not None
         tools = (await srv.session.list_tools()).tools
-        assert len(tools) == 6
+        assert len(tools) == 7
         assert all(t.description and t.description.strip() for t in tools)
         check_annotations(tools)  # as the client receives them
         prompts = (await srv.session.list_prompts()).prompts
@@ -260,7 +260,7 @@ async def test_initialize_does_not_wait_for_an_unreachable_host(tmp_path) -> Non
     started = time.monotonic()
     async with server(target, tmp_path) as srv:
         elapsed = time.monotonic() - started
-        assert len((await srv.session.list_tools()).tools) == 6
+        assert len((await srv.session.list_tools()).tools) == 7
     assert elapsed < 2.5, elapsed
 
 
@@ -269,7 +269,7 @@ async def test_starts_without_a_device_and_connects_when_it_appears(tmp_path) ->
     target = SimpleNamespace(host="127.0.0.1", port=port)
     async with server(target, tmp_path, MODBUS_WRITES_ENABLED="true") as srv:
         assert srv.init.serverInfo.name == "Modbus MCP Server"
-        assert len((await srv.session.list_tools()).tools) == 6
+        assert len((await srv.session.list_tools()).tools) == 7
 
         unreachable = f"cannot reach device at 127.0.0.1:{port}"
         down = await srv.call("read_register", address=0)
@@ -304,6 +304,7 @@ EVERY_TOOL = {
     "write_coils_bulk": {"address": 61, "values": [True, False]},
     "mask_write_register": {"address": 62, "and_mask": 65532, "or_mask": 3},
     "read_device_information": {},
+    "get_connection_status": {},
     "read_holding_typed": {"address": 63, "dtype": "float32"},
     "read_input_typed": {"address": 0, "dtype": "uint16", "scale": 0.1},
     "list_tags": {},
@@ -374,6 +375,7 @@ def raw_session(env: dict[str, str]) -> tuple[dict[int, dict], list[str]]:
             "read_values",
             "write_values",
             "read_device_information",
+            "get_connection_status",
             "list_tags",
         }, "EVERY_TOOL must call every tool"
         for name, arguments in EVERY_TOOL.items():
@@ -435,6 +437,19 @@ def test_stdout_is_clean_without_a_device(tmp_path) -> None:
     results = envelopes(responses)
     unreachable = f"cannot reach device at 127.0.0.1:{port}"
     assert results["list_tags"]["success"] is True  # needs no device
-    for name in set(EVERY_TOOL) - {"list_tags"}:
+    assert results["get_connection_status"]["success"] is True
+    assert results["get_connection_status"]["data"]["capabilities"]["device_verified"] is False
+    for name in set(EVERY_TOOL) - {"list_tags", "get_connection_status"}:
         assert results[name]["success"] is False, name
         assert results[name]["error"] == unreachable, (name, results[name])
+
+
+async def test_canonical_uint64_read_is_lossless_over_stdio(mock, tmp_path):
+    async with server(mock, tmp_path, MODBUS_WRITES_ENABLED="true") as srv:
+        written = await srv.call("write_values", target="holding", address=40, values=[65535] * 4)
+        assert written["success"] is True
+        result = await srv.call("read_values", source="holding_typed", address=40, dtype="uint64")
+    assert result["success"] is True
+    assert result["data"]["values"] == ["18446744073709551615"]
+    assert result["meta"]["value_encoding"] == "decimal_string"
+    assert "/data/values/0" in result["meta"]["encoded_integer_paths"]

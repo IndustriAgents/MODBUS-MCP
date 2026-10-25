@@ -30,6 +30,11 @@ from ..protocol.hints import DEVICE_WRITE, READ_ONLY
 def register_tools(mcp, context_for, policy=None):
 
     @mcp.tool(annotations=READ_ONLY)
+    async def get_connection_status(ctx: Context) -> dict[str, Any]:
+        """Inspect configured endpoint and backend support without device I/O."""
+        return await diagnostics_operations.get_connection_status(context_for(ctx))
+
+    @mcp.tool(annotations=READ_ONLY)
     async def read_register(
         address: Address, ctx: Context, slave_id: SlaveId = None
     ) -> dict[str, Any]:

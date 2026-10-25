@@ -74,7 +74,7 @@ def test_no_reconnect_while_connected(client, ctx) -> None:
 def test_log_calls_are_awaited(client, ctx) -> None:
     # FakeContext only records a message when the coroutine actually runs.
     run(cli.read_register(0, ctx))
-    assert ("info", "Read register 0 from slave 1: 0") in ctx.logs
+    assert ("info", "Read register 0 from slave 1") in ctx.logs
     client.before = lambda name: (_ for _ in ()).throw(ModbusIOException("boom"))
     run(cli.read_coils(0, 1, ctx))
     assert any(level == "error" and "boom" in m for level, m in ctx.logs)

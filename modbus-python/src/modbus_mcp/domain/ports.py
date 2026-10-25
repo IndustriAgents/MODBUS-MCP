@@ -1,6 +1,26 @@
 """Native Modbus connection required by application operations."""
 
+from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
+
+
+class ModbusTransportPort(Protocol):
+    """Injected native invocation, recovery and version-specific addressing."""
+
+    def unit(self, client: Any, slave_id: int) -> dict[str, int]: ...
+
+    async def request(
+        self,
+        ctx: Any,
+        app: Any,
+        op: str,
+        call_factory: Callable[[], Awaitable[Any]],
+        max_retries: int | None = None,
+        *,
+        write: bool = False,
+        details: dict[str, Any] | None = None,
+        check: Callable[[Any], dict[str, Any] | None] | None = None,
+    ) -> tuple[Any | None, str | None, float, int]: ...
 
 
 class ModbusClientPort(Protocol):

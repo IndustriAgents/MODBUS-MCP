@@ -13,9 +13,9 @@ from mcp.server.fastmcp import Context, FastMCP
 
 from . import __version__
 from .adapters.transport import _RX_KEEP as _RX_KEEP
+from .adapters.transport import ModbusTransport, SendGate, _make_client
 from .adapters.transport import NotConnected as NotConnected
 from .adapters.transport import RequestNotSent as RequestNotSent
-from .adapters.transport import SendGate, _make_client
 from .adapters.transport import _desync as _desync
 from .adapters.transport import _frames_now as _frames_now
 from .adapters.transport import _reconnect as _reconnect
@@ -301,7 +301,7 @@ def main(argv: list[str] | None = None) -> None:
 
 
 def context_for(ctx):
-    return OperationContext(_app(ctx), ctx.info, ctx.error)
+    return OperationContext(_app(ctx), ctx.info, ctx.error, ModbusTransport())
 
 
 def _make_server(configuration=None, policy=None):

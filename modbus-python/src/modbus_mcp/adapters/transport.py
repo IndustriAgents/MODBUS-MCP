@@ -236,7 +236,9 @@ async def _retry_call(
             if mismatch:
                 _desync(app)
                 details["reply_mismatch"] = mismatch
-                await ctx.error(f"{op}: the reply does not match the request: {mismatch}")
+                await ctx.error(
+                    f"{op}: the reply does not match the request ({', '.join(sorted(mismatch))})"
+                )
                 if write:
                     return (None, WRITE_REPLY_MISMATCH, elapsed_ms(), attempt)
                 last_err = READ_REPLY_MISMATCH
@@ -310,3 +312,10 @@ def _make_client(settings: Settings, trace_packet: Callable[[bool, bytes], bytes
         timeout=settings.serial_timeout,
         **common,
     )
+
+
+class ModbusTransport:
+    """Stateless port adapter; lifecycle and send tracking remain instance-owned."""
+
+    unit = staticmethod(_unit)
+    request = staticmethod(_retry_call)

@@ -50,7 +50,8 @@ TypeScript implementation: npm carries the same wheel as the PyPI release.
 | `mask_write_register` | No mode selector | Changes state or consumes events |
 | `read_device_information` | No mode selector | Read/local |
 | `list_tags` | No mode selector | Read/local |
-| `ping` | No mode selector | Read/local |
+| `ping` | No mode selector | Device read |
+| `get_connection_status` | No mode selector | Local configuration and capabilities |
 
 A mode selects one protocol operation. Parameters from different modes cannot
 be mixed; unknown parameters fail before dispatch. Alias/tag modes resolve
@@ -180,7 +181,7 @@ both text content and structured content, including text-only native results.
 Cancellation releases admission capacity and retains an unknown audit outcome
 when no result was observed.
 
-### Configuration and remaining native boundary
+### Configuration and native invocation boundary
 
 The CLI resolves `MODBUS_POLICY_FILE` together with connection settings after
 `--env-file`, and reports invalid policies as configuration errors on stderr.
@@ -189,10 +190,12 @@ Importing the compatibility server does not load process policy. Independent
 The implicit project `.env` lookup recognizes both the current distribution
 name and its legacy name; it still never searches the caller's working directory.
 
-Application modules currently call the adapter's `_retry_call` and unit-keyword
-helpers. Recovery therefore remains coupled to the existing Modbus transport
-helper rather than a fully injected OPCUA-style execution port. Native retries,
-send fences and reply correlation retain their existing ownership and tests.
+Application modules receive `ModbusTransportPort` through `OperationContext`.
+The composition root supplies `ModbusTransport`, whose invocation and unit-keyword
+methods delegate to the existing native helper. Native retries, send fences and
+reply correlation retain their ownership and tests; application modules import
+neither the native adapter nor the SDK. Responses still follow the Modbus port's
+structural field contract rather than claiming OPC UA value/status semantics.
 
 ## Retry evidence
 
@@ -207,3 +210,19 @@ The application currently calls the established transport recovery helpers
 directly. This coupling is retained to keep the existing send-fence and
 cancellation pipeline intact; it is an explicit difference from OPCUA-MCP's
 fully injected execution ports.
+
+## Protocol assessment and capability reporting
+
+See [protocol-assessment.md](protocol-assessment.md) for authoritative sources,
+the capability/gap matrix, implementation decisions and hardware test boundaries.
+`get_connection_status` returns typed `data.capabilities` without device I/O.
+`scope: backend_support` and `device_verified: false` distinguish implemented
+software from verified device support. `enabled` reports native configuration
+gates only; policy and device permissions still apply.
+
+Application operations now receive the transport invocation/compatibility port
+through `OperationContext`; they no longer import native adapters. FC43/14 identity
+reads follow bounded, validated continuation and preserve partial data on failure.
+The local status tool is the seventh canonical tool; `ping` remains a device probe.
+
+Edit named `resultShapes` in `contract/tools.json`, run `python3 scripts/sync_contract.py` to regenerate advertised data schemas and the packaged resource, then run `python3 scripts/verify_contract.py` to check drift.
